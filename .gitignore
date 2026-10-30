@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# Bake-Caches und Render-Ergebnisse gehoeren nicht ins Repo
+cache/
+*_cache/
+HydroKit_Ergebnisse/
+*.blend1

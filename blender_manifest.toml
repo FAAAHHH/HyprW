@@ -1,0 +1,20 @@
+schema_version = "1.0.0"
+
+id = "hydrokit"
+type = "add-on"
+version = "1.0.0"
+name = "HyprW"
+tagline = "Hyper realistic water: simulation, whitewater, mist, lens drops"
+maintainer = "FAAAHHH"
+website = "https://github.com/FAAAHHH/HyprW"
+tags = ["Physics", "Material"]
+blender_version_min = "5.2.0"
+license = ["SPDX:GPL-3.0-or-later", "SPDX:MIT"]
+# The bundled engine library is built for Linux; see README.md
+platforms = ["linux-x64"]
+
+[permissions]
+files = "Reads and writes simulation caches"
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "/.git/", "/.gitignore", "/tests/", "*.zip"]
