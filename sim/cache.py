@@ -22,9 +22,14 @@ GISCHT_ARTEN = ("foam", "bubble", "spray", "dust")
 
 
 def pfad_aufloesen(roh):
-    """Blender path (//...) to a real path."""
+    """Blender path (//...) to a real path. A // path in an unsaved file gives
+    "": bpy.path.abspath made it relative to Blender's working folder, so every
+    new file showed (and cleared) the same bake, and after the first save the
+    bake was gone."""
     import bpy
-    return bpy.path.abspath(roh) if roh else ""
+    if not roh or (roh.startswith("//") and not bpy.data.filepath):
+        return ""
+    return bpy.path.abspath(roh)
 
 
 def vorbereiten(cache):
@@ -38,6 +43,8 @@ def info_schreiben(cache, daten):
 
 
 def info_lesen(cache):
+    if not cache:
+        return None         # "" is Blender's working folder, never a cache
     pfad = os.path.join(cache, INFO)
     if not os.path.isfile(pfad):
         return None
@@ -94,7 +101,7 @@ PARTIKEL_ENDUNG = ".hkp"
 KOPF = b"HKP3"
 
 
-def _partikeldatei(cache, frame):
+def partikel_datei(cache, frame):
     return os.path.join(cache, FRAMES, f"{frame:06d}{PARTIKEL_ENDUNG}")
 
 
@@ -103,7 +110,7 @@ def partikel_schreiben(cache, frame, positionen, geschwindigkeiten,
     import struct
     vorbereiten(cache)
     n = len(kennungen)
-    with open(_partikeldatei(cache, frame), "wb") as f:
+    with open(partikel_datei(cache, frame), "wb") as f:
         f.write(KOPF)
         f.write(struct.pack("<i", n))
         f.write(positionen)
@@ -116,7 +123,7 @@ def partikel_schreiben(cache, frame, positionen, geschwindigkeiten,
 def partikel_lesen(cache, frame):
     """(positions, velocity, lifetime, IDs, types) as bytes — or None."""
     import struct
-    pfad = _partikeldatei(cache, frame)
+    pfad = partikel_datei(cache, frame)
     if not os.path.isfile(pfad):
         return None
     try:
@@ -168,6 +175,8 @@ def mesh_lesen_np(cache, frame, art=None):
 
 def gebackene_frames(cache):
     """Sorted list of the frames for which a surface exists."""
+    if not cache:
+        return []
     ordner = os.path.join(cache, FRAMES)
     if not os.path.isdir(ordner):
         return []
@@ -182,6 +191,8 @@ def gebackene_frames(cache):
 def leeren(cache):
     """Remove all baked data, keep the folder itself."""
     import shutil
+    if not cache:
+        return              # "" would empty frames/ in Blender's working folder
     ordner = os.path.join(cache, FRAMES)
     if os.path.isdir(ordner):
         shutil.rmtree(ordner, ignore_errors=True)

@@ -33,10 +33,21 @@ def _linse_an_neu(self, context):
 
 
 def _aussehen_neu(self, context):
-    """Make appearance sliders visible right away — without a new bake."""
+    """Make appearance sliders visible right away — without a new bake.
+    Whitewater only: the water body keeps its look until Apply Water."""
     from ..sim import aussehen
     try:
-        aussehen.anwenden(context)
+        aussehen.anwenden(context, wasser=False)
+    except Exception:
+        pass
+
+
+def _menge_neu(self, context):
+    """Amount sliders: the viewport shows the new share while dragging,
+    without reloading the surface mesh."""
+    from ..sim import anzeige
+    try:
+        anzeige.gischt_neu(context.scene)
     except Exception:
         pass
 
@@ -100,8 +111,9 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
     )
     geraet_mesh: bpy.props.EnumProperty(
         name="Surface Mesh",
-        description=("Where the distance field of the water surface mesh is computed "
-                     "(three quarters of the mesh time). Both give exactly the same mesh"),
+        description=("Where the water surface mesh is computed: distance field, marching "
+                     "cubes, smoothing and the lighter viewport mesh. Both give exactly the "
+                     "same mesh"),
         items=[('CPU', "CPU", "On the processor"), ('GPU', "GPU", "On the graphics card")],
         default='GPU',
     )
@@ -144,21 +156,54 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
     )
     vorschau_aufloesung: bpy.props.IntProperty(
         name="Preview",
-        description=("Resolution of the coarse preview mesh for the viewport. "
-                     "The full mesh is always rendered. 0 = no preview"),
+        description=("Cells along the longest domain side for the Coarse Preview. "
+                     "The render mesh is always rendered. 0 = no preview"),
         default=60, min=0, max=400, soft_max=150,
     )
     vorschau_im_viewport: bpy.props.BoolProperty(
-        name="Preview in Viewport",
-        description=("Show the coarse mesh in the viewport; the full one is "
-                     "rendered. Only needed for very fine bakes (subdivision 2+): "
-                     "thin jets break up into single blobs in it"),
+        name="Coarse Preview",
+        description=("Show a much coarser mesh in the viewport, for very large "
+                     "bakes; it replaces the Viewport detail and the render mesh "
+                     "is rendered. Thin jets break up into single blobs in it"),
         default=False,
+        update=lambda self, context: _anzeige_neu(context),
     )
+    # WATER MESH DETAIL: how often each simulation cell is split for the mesh.
+    # 1 meshes on the simulation cells themselves: a falling sheet thinner
+    # than a cell turns into coarse blobs with holes. FLIP Fluids passes its
+    # Subdivisions + 1 to the same engine, so its default is 2 here. Measured
+    # on the waterfall scene (5.3 cm cells, 110 frames, 02.11.2026):
+    #   detail  loose pieces  bake time  mesh cache
+    #     1         104        49 s       58 MB
+    #     2          24        64 s      235 MB
+    #     3          21       101 s      551 MB
+    # The engine refuses 0 (setSurfaceSubdivisionLevel), so 1 is the minimum.
     oberflaechen_unterteilung: bpy.props.IntProperty(
-        name="Subdivision",
-        description="Detail of the generated surface mesh",
-        default=1, min=0, max=3,
+        name="Mesh Detail",
+        description=("How often each simulation cell is split for the water mesh (rendered, "
+                     "and shown in the viewport unless Lighter Viewport is on). 1 = coarse "
+                     "blobs with holes in thin falling water, 2 = FLIP Fluids' default, "
+                     "3 = finest (measured: about twice the bake time and 9 times the mesh "
+                     "cache of 1). Takes effect with the next bake"),
+        default=2, min=1, max=3,
+        update=lambda self, context: _anzeige_neu(context),
+    )
+    # A second, lighter mesh for the viewport only on request: it costs cache
+    # space, and one mesh for both is what most scenes need
+    viewport_eigenes_netz: bpy.props.BoolProperty(
+        name="Lighter Viewport",
+        description=("Also write a lighter water mesh for the viewport (Viewport Detail), "
+                     "for smooth scrubbing; renders keep the Mesh Detail. Off: viewport and "
+                     "render show the same mesh. Takes effect with the next bake"),
+        default=False,
+        update=lambda self, context: _anzeige_neu(context),
+    )
+    unterteilung_viewport: bpy.props.IntProperty(
+        name="Viewport Detail",
+        description=("Detail of the lighter viewport mesh (Lighter Viewport on). Must be "
+                     "below the Mesh Detail; the bake computes it from the same field"),
+        default=1, min=1, max=3,
+        update=lambda self, context: _anzeige_neu(context),
     )
     gischt: bpy.props.BoolProperty(
         name="Whitewater",
@@ -172,6 +217,54 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
                      "whole jet is a thin sheet — measured, an 8 m pool filled "
                      "halfway in 3 seconds with it"),
         default=False,
+    )
+
+    # --- Adaptive particle sizes (engine_patch/README.md section 9) -------
+    # Deep water merges into bigger particles, near the air it stays at the
+    # standard size. Split/merge depths after Adams, Pauly, Keiser, Guibas
+    # 2007, "Adaptively Sampled Particle Fluids", Section 4.2.
+    adaptiv_an: bpy.props.BoolProperty(
+        name="Adaptive Particles",
+        description=("Deep water merges into bigger particles, near the air and "
+                     "obstacles it stays at the standard size (8 per cell). The "
+                     "grid resolution does not change. Saves time and memory in "
+                     "deep, calm water; a waterfall stays fine"),
+        default=False,
+    )
+    adaptiv_max_stufe: bpy.props.IntProperty(
+        name="Max Size",
+        description=("Largest particle in halvings: every step doubles the volume. "
+                     "3 = one particle per cell (8 standard particles)"),
+        default=3, min=1, max=6,
+    )
+    adaptiv_teilungsdauer: bpy.props.FloatProperty(
+        name="Split Time (s)",
+        description=("Seconds per halving, and per merge step. A particle about "
+                     "to reach the air or an obstacle splits at once regardless. "
+                     "APPROXIMATION: there is no measured value, 0.25 s is the "
+                     "default"),
+        default=0.25, min=0.02, max=2.0,
+    )
+    adaptiv_teil_faktor: bpy.props.FloatProperty(
+        name="Split Depth",
+        description=("A merged particle splits once it is less deep below the "
+                     "surface than this many of its radii. Adams et al. 2007: 2"),
+        default=2.0, min=1.0, max=10.0,
+    )
+    adaptiv_verschmelz_faktor: bpy.props.FloatProperty(
+        name="Merge Depth",
+        description=("Particles merge only if the merged particle is deeper than "
+                     "this many of its radii. Keep it above Split Depth, otherwise "
+                     "particles flicker between merging and splitting. "
+                     "Adams et al. 2007: 3"),
+        default=3.0, min=1.0, max=12.0,
+    )
+    adaptiv_hindernis_abstand: bpy.props.IntProperty(
+        name="Obstacle Distance",
+        description=("Merged particles keep at least this many cells away from "
+                     "obstacles and the domain walls; the engine resolves "
+                     "collisions within 3 cells"),
+        default=3, min=1, max=10,
     )
     offene_raender: bpy.props.BoolVectorProperty(
         name="Open Borders",
@@ -410,24 +503,24 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
     # same settings, same result. New names instead of the former
     # linse_*_an/_anteil (0..1), so old values are not read as percent.
     linse_wasser_haftet: bpy.props.BoolProperty(
-        name="sticks", default=True,
+        name="Stick to Lens", default=True,
         description="Whether water reaching the camera leaves drops on the glass")
     linse_spray_haftet: bpy.props.BoolProperty(
-        name="sticks", default=True,
+        name="Stick to Lens", default=True,
         description="Whether spray hitting the camera sticks to the glass")
     linse_nebel_haftet: bpy.props.BoolProperty(
-        name="sticks", default=True,
+        name="Stick to Lens", default=True,
         description="Whether mist hitting the camera settles on the glass")
     linse_wasser_haftanteil: bpy.props.FloatProperty(
-        name="how much sticks", default=100.0, min=0.0, max=100.0, subtype='PERCENTAGE',
+        name="Sticking Share", default=100.0, min=0.0, max=100.0, subtype='PERCENTAGE',
         description=("Share of water hits that stays on the glass. The rest counts as "
                      "bounced off or run off"))
     linse_spray_haftanteil: bpy.props.FloatProperty(
-        name="how much sticks", default=100.0, min=0.0, max=100.0, subtype='PERCENTAGE',
+        name="Sticking Share", default=100.0, min=0.0, max=100.0, subtype='PERCENTAGE',
         description=("Share of spray hits that stays on the glass. The rest counts as "
                      "bounced off"))
     linse_nebel_haftanteil: bpy.props.FloatProperty(
-        name="how much sticks", default=100.0, min=0.0, max=100.0, subtype='PERCENTAGE',
+        name="Sticking Share", default=100.0, min=0.0, max=100.0, subtype='PERCENTAGE',
         description=("Share of mist hits that stays on the glass. The rest counts as "
                      "blown past"))
 
@@ -604,16 +697,16 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
     # Bake generously once, then dose.
     menge_nebel: bpy.props.FloatProperty(
         name="Mist", description="Share of the baked mist particles that is shown",
-        default=1.0, min=0.0, max=1.0, subtype='FACTOR')
+        default=1.0, min=0.0, max=1.0, subtype='FACTOR', update=_menge_neu)
     menge_spray: bpy.props.FloatProperty(
         name="Spray", description="Share of the baked spray particles",
-        default=1.0, min=0.0, max=1.0, subtype='FACTOR')
+        default=1.0, min=0.0, max=1.0, subtype='FACTOR', update=_menge_neu)
     menge_foam: bpy.props.FloatProperty(
         name="Foam", description="Share of the baked foam particles",
-        default=1.0, min=0.0, max=1.0, subtype='FACTOR')
+        default=1.0, min=0.0, max=1.0, subtype='FACTOR', update=_menge_neu)
     menge_bubble: bpy.props.FloatProperty(
         name="Bubbles", description="Share of the baked bubbles",
-        default=1.0, min=0.0, max=1.0, subtype='FACTOR')
+        default=1.0, min=0.0, max=1.0, subtype='FACTOR', update=_menge_neu)
 
     # --- Wind on the water itself ---------------------------------------
     # Wind acts on the interface with the air. So this force only works in

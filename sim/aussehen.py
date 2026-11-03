@@ -22,9 +22,19 @@
 
 import bpy
 
-from . import anzeige, geometrie
+from . import anzeige, cache, geometrie
 
 PREFIX = "HK "
+
+# Version of the generated look. Raise it whenever a generated material
+# changes in a way an older file must not keep. 2 (30.10.2026): foam without
+# subsurface — Cycles renders subsurface on points black on the GPU, and old
+# files kept that foam until Apply Look. 3 (02.11.2026): studio water (light
+# through the surface, caustics, capillary ripples, dispersion). Files whose
+# water or whitewater materials are older get them rebuilt when opened
+# (anzeige._nach_laden).
+MATERIAL_STAND = 3
+STAND_KEY = "hk_material_stand"
 
 # Density x radius — calibrated on a waterfall scene:
 #   radius  8 cm, density 0.5   barely visible
@@ -84,7 +94,35 @@ def _material(name):
         mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     mat.node_tree.nodes.clear()
+    mat[STAND_KEY] = MATERIAL_STAND
     return mat
+
+
+def wasser_veraltet():
+    """True if the water body carries a water built by an older HyprW. A
+    material of the user's own (no stand, no "HK " name) never counts: it
+    was replaced by HyprW water on every open."""
+    flaeche = bpy.data.objects.get(anzeige.OBERFLAECHE)
+    if flaeche is None or not getattr(flaeche.data, "materials", None):
+        return False
+    return any(m is not None and (STAND_KEY in m or m.name.startswith(PREFIX))
+               and m.get(STAND_KEY, 0) < MATERIAL_STAND for m in flaeche.data.materials)
+
+
+def materialien_veraltet():
+    """True if the water or whitewater materials in this file were built by
+    an older HyprW (MATERIAL_STAND)."""
+    if wasser_veraltet():
+        return True
+    mats = []
+    for name, _ in ZEICHENGROESSE.values():
+        m = bpy.data.materials.get(PREFIX + name)
+        if m is not None and m.users > 0:
+            mats.append(m)
+    nebel = bpy.data.materials.get(PREFIX + "Nebel")
+    if nebel is not None and nebel.users > 0:
+        mats.append(nebel)
+    return any(m.get(STAND_KEY, 0) < MATERIAL_STAND for m in mats)
 
 
 def _zufall(nt, x=-520, y=0):
@@ -696,30 +734,115 @@ def voxelgroesse(context):
     return masse[3] if masse else None
 
 
-def anwenden(context, wasser_variante=None):
-    """Put materials and geometry on everything that is baked."""
+# On the domain: the cell size the whitewater look was sized for
+LOOK_DX = "hk_look_dx"
+GISCHT_OBJEKTE = tuple(a[1] for a in anzeige.ARTEN.values())
+
+
+def zellgroesse(context, info=None):
+    """Cell size of the baked frames, else of the current settings. The drawn
+    whitewater has to fit the bake on display: with a changed Resolution
+    and no new bake yet, the cached particles still come from the old
+    cells. info: the cache's info.json if already read."""
+    domain = geometrie.finde_domain(context.scene)
+    if domain is None:
+        return None
+    if info is None:
+        info = cache.info_lesen(cache.pfad_aufloesen(domain.hydrokit.cache_pfad)) or {}
+    return info.get("dx") or voxelgroesse(context)
+
+
+def look_stand(context, info=None):
+    """(state, text) of the look, for the panel and after a bake. State None:
+    nothing baked; 'fehlt': whitewater without its geometry (renders black)
+    or water without a material; 'veraltet': whitewater sized for other
+    cells; 'ok'. info: the cache's info.json if already read ({} = nothing
+    baked, e.g. after Clear Cache: the emptied objects stay)."""
+    flaeche = bpy.data.objects.get(anzeige.OBERFLAECHE)
+    domain = geometrie.finde_domain(context.scene)
+    if info is None and domain is not None:
+        info = cache.info_lesen(cache.pfad_aufloesen(domain.hydrokit.cache_pfad)) or {}
+    if flaeche is None or not info:
+        return None, "Nothing baked yet"
+    # Whitewater only if the bake on display has some: leftovers of an
+    # earlier bake are emptied, not styled (anzeige._gischt_leeren)
+    gischt = ([o for o in map(bpy.data.objects.get, GISCHT_OBJEKTE) if o is not None]
+              if info.get("gischt") else [])
+    if any(not any(m.type == 'NODES' for m in o.modifiers) for o in gischt):
+        return 'fehlt', "Whitewater has no look yet — renders black"
+    if not any(m is not None for m in flaeche.data.materials):
+        return 'fehlt', "The water has no material yet"
+    alt = domain.get(LOOK_DX) if domain is not None else None
+    jetzt = zellgroesse(context, info)
+    if gischt and alt and jetzt and abs(alt - jetzt) > 0.01 * jetzt:
+        return 'veraltet', (f"Whitewater sized for {alt * 100:.2f} cm cells, "
+                            f"now {jetzt * 100:.2f} cm")
+    return 'ok', "Look applied"
+
+
+def nach_bake(context):
+    """After a bake: new whitewater gets its look, whitewater from other
+    cells a new size. A water chosen with Apply Water stays as it is; only a
+    surface without any material gets one. True if something was applied."""
+    scene = context.scene
+    domain = geometrie.finde_domain(scene)
+    if domain is None:
+        return False
+    info = cache.info_lesen(cache.pfad_aufloesen(domain.hydrokit.cache_pfad)) or {}
+    # gischt_laden only creates the types present on the loaded frame; the
+    # others appeared later without a look and rendered black
+    if info.get("gischt"):
+        for _, name, _ in anzeige.ARTEN.values():
+            if name != "HK_Nebel" or info.get("nebel"):
+                anzeige._objekt_holen(name, scene)
+    stand, _ = look_stand(context, info)
+    # A look from before LOOK_DX was sized for unknown cells: size it once
+    if stand == 'ok' and info.get("gischt") and domain.get(LOOK_DX) is None:
+        stand = 'veraltet'
+    if stand in (None, 'ok'):
+        return False
+    flaeche = bpy.data.objects.get(anzeige.OBERFLAECHE)
+    ohne = not any(m is not None for m in flaeche.data.materials)
+    return bool(anwenden(context, wasser=ohne))
+
+
+def wasser_anwenden(context, wasser_variante=None):
+    """The water body alone gets its material from the water settings;
+    whitewater keeps its look. Name of the material, None without water."""
+    flaeche = bpy.data.objects.get(anzeige.OBERFLAECHE)
+    if flaeche is None:
+        return None
+    from ..operators import materials_ops as mo
+    scene = context.scene
+    mat = mo.wasser_aus_einstellungen(scene, wasser_variante)
+    mo.volumen_strahlen(scene)
+    flaeche.data.materials.clear()
+    flaeche.data.materials.append(mat)
+    # smooth faceted water
+    for p in flaeche.data.polygons:
+        p.use_smooth = True
+    return mat.name
+
+
+def anwenden(context, wasser_variante=None, wasser=True):
+    """Put materials and geometry on everything that is baked. wasser=False
+    leaves the water body as it is (whitewater sliders)."""
     scene = context.scene
     domain = geometrie.finde_domain(scene)
     if domain is None:
         return {}
-    voxel = voxelgroesse(context) or 0.03
+    voxel = zellgroesse(context)
+    if voxel:
+        domain[LOOK_DX] = voxel         # look_stand: sized for these cells
+    voxel = voxel or 0.03
     props = domain.hydrokit
     erledigt = {}
 
     # --- Water ----------------------------------------------------------
-    flaeche = bpy.data.objects.get(anzeige.OBERFLAECHE)
-    if flaeche is not None:
-        from ..operators import materials_ops as mo
-        variante = wasser_variante or scene.hydrokit.wasser_variante
-        mat = mo.baue_wasser(variante, scene.hydrokit.wasser_kraeuselung,
-                             scene.hydrokit.wasser_sichtweite, scene.hydrokit.wasser_geloest)
-        mo.volumen_strahlen(scene)
-        flaeche.data.materials.clear()
-        flaeche.data.materials.append(mat)
-        # smooth faceted water
-        for p in flaeche.data.polygons:
-            p.use_smooth = True
-        erledigt["Water"] = mat.name
+    if wasser:
+        name = wasser_anwenden(context, wasser_variante)
+        if name is not None:
+            erledigt["Water"] = name
 
     # --- Whitewater -----------------------------------------------------
     for art, (_, faktor) in ZEICHENGROESSE.items():
@@ -742,6 +865,7 @@ def anwenden(context, wasser_variante=None):
             mat = baue_nebel_material(dichte, props.nebel_groesse, radius_nebel)
             ng = _gruppe_nebel("HK Nebel", radius_nebel, dichte, mat, voxel)
             _eevee_volumen(scene, domain)
+            radius = radius_nebel       # the report shows the real mist sphere
         else:
             mat = baue_gischt_material(art, radius, props.schaum_blasen,
                                        tuple(props.spray_farbe),

@@ -130,7 +130,7 @@ level set), advection (the velocity transfer) and pressure (the PCG solve).
 
 | Step | On the GPU | Agreement with the CPU (60 waterfall frames) |
 |---|---|---|
-| Surface mesh | distance field from the particles | bit-identical, 26.9 M values |
+| Surface mesh | distance field, viewport mesh field, marching cubes, smoothing | bit-identical, 26.9 M values; the rest 494 M values over 30 frames at detail 3 |
 | Whitewater | curvature: level set reinitialization | bit-identical, 41.0 M values |
 | Water particles | liquid level set from the particles | bit-identical, 41.0 M values |
 | Advection | FLIP transfer particles -> grid | float rounding, at most 1.9e-6 m/s over 125 M faces |
@@ -162,6 +162,43 @@ stays on the CPU.
 - **Speed.** Waterfall, 120 frames: mesh step 30.1 s on the CPU, 10.2 s with
   the GPU field (2.9x); the whole bake 151 s -> 140 s, as much as the mesh
   step's share allows.
+
+### Surface mesh: viewport mesh, marching cubes, smoothing
+
+At mesh detail 3 (each cell split three times, see the add-on's Mesh
+Detail) the field has 27 times the nodes, and the CPU work after it takes
+over. Measured on the waterfall (resolution 150, detail 3 with a lighter
+viewport mesh at 2, frames 31-60, 02.11.2026), per frame on the CPU: the
+viewport mesh's field 138 ms, marching cubes 137 ms for the render mesh and
+48 ms for the viewport mesh, smoothing 46 ms. All of it now follows the
+surface mesh step onto the GPU, each part bit-identical:
+
+- **Viewport mesh field** (`hk_mesher_preview_resample`):
+  `_addComputeChunkScalarFieldToPreviewField`, sampled while the chunk's field
+  is still on the GPU. Not with merged particles (section 9): the CPU changes
+  the field first.
+- **Marching cubes** (`hk_mc_count`, `hk_scan_*`, `hk_mc_vertices`,
+  `hk_mc_triangles`): `Polygonizer3d` for both meshes, the same vertices and
+  triangles in the same order. The CPU numbers vertices in cell order (k
+  outermost) and creates a crossed edge's vertex in the first cell sharing
+  the edge; which cell that is depends only on whether i, j or k is 0. So
+  prefix sums over per-cell counts give the CPU's numbering, and the creating
+  cell interpolates in the CPU's direction. No EdgeGrid: a vertex created
+  elsewhere is looked up at its creating cell.
+- **Smoothing** (`hk_smooth_*`): `TriangleMesh::smooth`, the per-vertex
+  triangle lists sorted ascending like `_updateVertexTriangles`, the division
+  as vmath's `operator/=` (1.0 / count in double, multiplied as float).
+
+Mesh step about 800 -> 476-506 ms per frame (the spread of four runs); 60
+frames bake in 41.5-43.5 s instead of 56-59 s. Verify mode, 30 frames: 501
+million values, 0 differ (counted per coordinate and index; the merge of the
+viewport field and the host copies are timed as GPU work, so Pick the
+Fastest per Step sees the whole GPU path). GPU memory for marching cubes at
+detail 3: about 160 MB (the buffers' sizes). The mesh buffers stay allocated
+between frames; when another step runs short of GPU memory, they are freed
+first and that step tries once more instead of falling back to the CPU.
+Still on the CPU: building the
+chunk's field with its solid nodes (about 120 ms per frame at detail 3).
 
 ### Whitewater: the surface curvature
 
@@ -238,6 +275,102 @@ Files: `hkgpu.h/.cpp` (driver, buffers, fallback), `hkgpu_kernels.cu`,
 (`ParticleLevelSet`, `VelocityAdvector`, `PressureSolver`).
 `CMakeLists.txt` lists the two new sources
 and links `${CMAKE_DL_LIBS}` — the only change outside `src/engine/`.
+
+## 9. Adaptive particle sizes
+
+Deep water merges into bigger marker particles, near the air, obstacles and
+in fast flow it stays at the standard size (dx³/8, 8 per cell). The grid
+does not change. Switch: `enable_adaptive_particles`; add-on: "Adaptive
+Particles" in the domain settings (off by default).
+
+**Sizes.** A particle carries a level L (attribute `HKLEVEL`, unsigned
+char): it holds the volume of 2^L standard particles, its radius grows by
+2^(L/3). Merging two particles of level L gives one of level L+1, splitting
+gives two of level L-1 — the binary scheme of Adams, Pauly, Keiser, Guibas
+2007, "Adaptively Sampled Particle Fluids", SIGGRAPH, Section 4.2: position
+at the midpoint, velocity averaged (merge) or inherited (split), so mass and
+momentum are kept; children are placed symmetrically along a random
+direction, half the child spacing apart. Float and vector attributes are
+averaged on merge; only particles with the same source, density and
+viscosity merge; split copies get a new ID/UID for the particle export.
+
+**When.** Depth = distance in cells to the nearest air cell (Chebyshev, from
+3x3x3 erosions of the "not air" mask, so never overestimated). With
+R(L) = 0.866 dx · 2^(L/3) (the level set radius of the level):
+
+- split if depth < α R + 1, merge into L only if depth > β R + 1, with
+  α = 2 and β = 3 as in Adams et al. 2007 §4.2; the merge depth is forced at
+  least one cell above both split depths, whatever the factors, so particles
+  do not flicker
+- look-ahead: the depth is reduced by speed × (time step + L × split time),
+  so fast water never merges and a merged particle halves its way down in
+  time; split time = time per halving, default 0.25 s (APPROXIMATION, the
+  user's choice — no measured value exists)
+- regular splits and merges once per split time (one halving per particle);
+  in between a merged particle splits down to level 0 at once if the level
+  set shows air within R + 2 cells (six axis directions and ahead along its
+  velocity), if it comes closer to a solid than the obstacle distance, or if
+  it gets fast enough to emit whitewater
+- obstacles and domain walls: merged particles keep the obstacle distance
+  (default 3 cells, the engine resolves collisions within 3 cells) plus R;
+  merging needs one cell more (hysteresis)
+- whitewater on: merged particles stay below the emitter speed
+  sqrt(2 E_min). Below it the energy potential is zero, so a merged particle
+  emits exactly what its standard particles would: nothing
+
+**Where it saves.** Merged particles do not enter the particle level set,
+the FLIP transfer and the surface mesher. The cells within R(L) of a merged
+particle are interior instead: phi = min(phi, -0.433 dx) in the level set,
+mesher nodes inside count as inside; grid faces that no standard particle
+reached get the mass-weighted (2^L) average of the merged particles around
+them (tent kernel one cell wide up to level 3, wider beyond; APIC adds the
+affine term). The five GPU steps keep working unchanged on the standard
+particles. Inflows and fluid objects do not refill cells covered by merged
+particles.
+
+**Measured** (each pair of runs back to back on the same machine):
+
+| Scene | without | with |
+|---|---|---|
+| Pool 4 x 2 x 2 m, 1.2 m deep, dx 5 cm, 120 frames, CPU | 796 ms/frame | 693 ms/frame (-13 %) |
+| the same pool, all five steps on the GPU | 427 ms/frame | 438 ms/frame (+3 %) |
+| HK_Wasserfall, dx 5.3 cm, 150 frames, CPU | 1135 ms/frame | 1146 ms/frame (noise) |
+
+Pool on the CPU: mesh -21 %, transfer -15 %, particles -9 %, pressure
+unchanged; 545,000 -> 391,000 particles (levels 0-3: 353k / 13.8k / 7.2k /
+16.8k); mesh volume 8.692 -> 8.697 m³; volume in standard particles
+544,610 -> 544,584. On the GPU the mesh and the level set are fast anyway,
+and the transfer of the merged particles runs on the CPU (+10 ms). In the
+waterfall only 2 % of the particles merge: the water is too fast and too
+shallow. In this test pool only about a third of the water may merge (24
+cells deep, walls on all sides); deeper and calmer water gains more. The
+memory for particles drops with their number in any case.
+
+**Off = unchanged.** Without the switch the attribute does not exist and
+every path runs as before: the pool test is bit-identical over 60 frames to
+the engine without this change (fixed seed, CPU, 16 threads).
+
+**Limits.** `HKLEVEL` is not part of the marker particle load/save API or
+the FFP3 fluid particle export: a merged particle would come back as one
+standard particle (HyprW uses neither). Turbulence-based whitewater from
+deep water is unaffected only because merged particles stay slower than
+the emitter speed.
+
+Files: `fluidsimulation.cpp/.h` (settings, pass, coverage, transfer),
+`particlesystem.cpp/.h` (`appendCopies`, `averageInto`),
+`particlelevelset.cpp/.h`, `velocityadvector.cpp/.h`,
+`particlemesher.cpp/.h`, `c_bindings/fluidsimulation_c.cpp`,
+`ffengine/fluidsimulation.py`.
+
+## 10. Fixed random seed (tests)
+
+`set_random_seed(seed)` fixes every random number the solver draws:
+particle jitter, fluid particle IDs, the source ID sampling, and the jitter
+of the inside test of triangle meshes (it used the process-wide `rand()`,
+which Blender calls as well). Two bakes of the same scene with the same seed
+and thread count give bit-identical particles — the regression test of
+section 9. Scenes with an inflow still differ by float rounding (about
+1e-5 m on the new particles).
 
 ## Lens drops (sim/linse.py, no engine change)
 

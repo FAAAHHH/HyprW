@@ -26,6 +26,7 @@ ERWEITERUNGEN = (
     ("gpu_partikel", "Water particles on the GPU", "FluidSimulation_enable_gpu_water_particles"),
     ("gpu_advektion", "Advection on the GPU", "FluidSimulation_enable_gpu_advection"),
     ("gpu_druck",    "Pressure on the GPU", "FluidSimulation_enable_gpu_pressure"),
+    ("adaptiv",      "Adaptive particles",  "FluidSimulation_enable_adaptive_particles"),
 )
 
 # The steps of a frame and their GPU versions (engine_patch/README.md section
@@ -40,6 +41,10 @@ STUFEN = (
     ("advektion", "Advection",       "enable_gpu_advection",       "gpu_advektion", "advection"),
     ("druck",     "Pressure",        "enable_gpu_pressure",        "gpu_druck",    "pressure"),
 )
+
+# Mesh cells per piece of the surface mesh, as FLIP Fluids' Auto mode
+# (domain_surface_properties.default_cells_per_compute_chunk, 15 million)
+NETZ_ZELLEN_PRO_STUECK = 15_000_000
 
 
 def hat_gpu(stufe):
@@ -113,6 +118,18 @@ def fehlende_erweiterungen():
     """Readable names of the extensions the loaded engine lacks."""
     kann = engine_erweiterungen()
     return [name for k, name, _ in ERWEITERUNGEN if not kann[k]]
+
+
+def zweites_netz(props):
+    """Which second water mesh a bake with these domain settings writes:
+    "grob" (Coarse Preview), "leicht" (Lighter Viewport below the Mesh
+    Detail) or None. The panel compares it with the cache's."""
+    if props.vorschau_im_viewport:
+        return "grob" if props.vorschau_aufloesung > 0 else None
+    if (props.viewport_eigenes_netz
+            and props.unterteilung_viewport < max(1, props.oberflaechen_unterteilung)):
+        return "leicht"
+    return None
 
 
 def _sim_aufbauen(scene, domain, bericht=None):
@@ -249,9 +266,30 @@ def _sim_aufbauen(scene, domain, bericht=None):
             sim.set_surface_wind_factor(props.wasser_wind)
             sim.set_surface_wind_depth(props.wasser_wind_tiefe)
 
-    sim.surface_subdivision_level = props.oberflaechen_unterteilung
+    # Water mesh detail (object_properties.oberflaechen_unterteilung). At
+    # least 1: the engine refuses 0, which older files could still hold.
+    render_stufe = max(1, props.oberflaechen_unterteilung)
+    sim.surface_subdivision_level = render_stufe
+    # The mesh in pieces like FLIP Fluids' Auto mode: detail 2 and 3 have 8
+    # and 27 times the mesh cells, and in one piece a large domain runs out
+    # of memory. At most NETZ_ZELLEN_PRO_STUECK cells per piece.
+    zellen = i * j * k * render_stufe ** 3
+    sim.num_polygonizer_slices = max(1, min(-(-zellen // NETZ_ZELLEN_PRO_STUECK),
+                                            min(i, j, k) * render_stufe, render_stufe ** 3))
     sim.CFL_condition_number = props.cfl
     sim.enable_sheet_seeding = props.sheeting
+
+    # ADAPTIVE PARTICLE SIZES (engine_patch/README.md section 9): deep water
+    # merges into bigger particles, the surface stays at the standard size.
+    if props.adaptiv_an and kann["adaptiv"]:
+        sim.adaptive_particle_max_level = props.adaptiv_max_stufe
+        sim.adaptive_particle_split_time = props.adaptiv_teilungsdauer
+        sim.adaptive_particle_split_factor = props.adaptiv_teil_faktor
+        sim.adaptive_particle_merge_factor = max(props.adaptiv_verschmelz_faktor,
+                                                 props.adaptiv_teil_faktor)
+        sim.adaptive_particle_solid_distance = props.adaptiv_hindernis_abstand
+        sim.enable_adaptive_particles = True
+
     sim.enable_diffuse_material_output = props.gischt
     zerstaeubung = False
     nebel_grenzen = None
@@ -377,10 +415,19 @@ def _sim_aufbauen(scene, domain, bericht=None):
     # has 167,000 vertices; creating it on every frame change costs about
     # 250 ms, and scrubbing stutters. On request the engine computes a second,
     # coarse mesh as well — the viewport shows that one, the full one is
-    # rendered automatically.
-    if props.vorschau_im_viewport and props.vorschau_aufloesung > 0:
+    # rendered automatically. Lighter Viewport (a Viewport Detail below the
+    # Mesh Detail) uses the same output: the engine resamples the render
+    # mesh's field onto the coarser grid (ParticleMesher), so both come from
+    # one bake.
+    # Which second mesh the cache holds, for sim/anzeige.py
+    vorschau = zweites_netz(props)
+    netz = {"detail": render_stufe, "vorschau": vorschau}
+    if vorschau == "grob":
         laengste = max(i, j, k) * dx
         sim.enable_preview_mesh_output = laengste / props.vorschau_aufloesung
+    elif vorschau == "leicht":
+        sim.enable_preview_mesh_output = dx / props.unterteilung_viewport
+        netz["viewport"] = props.unterteilung_viewport
 
     sim.initialize()
 
@@ -390,6 +437,7 @@ def _sim_aufbauen(scene, domain, bericht=None):
         "versatz": [versatz.x, versatz.y, versatz.z],
         "groesse": [groesse.x, groesse.y, groesse.z],
         "aufloesung": props.aufloesung,
+        "netz": netz,
         "gischt": props.gischt,
         "wind": [wind.x, wind.y, wind.z],
         "nebel": props.nebel_an and props.gischt,
@@ -410,6 +458,13 @@ def _sim_aufbauen(scene, domain, bericht=None):
     }
     info["verdickt"] = verdickt
     return sim, info, halter
+
+
+def cache_fehlt_text(domain):
+    """Why the domain's cache path gives no folder (cache.pfad_aufloesen)."""
+    if domain.hydrokit.cache_pfad.startswith("//"):
+        return "Save the file first: the cache goes next to it"
+    return "No cache folder set"
 
 
 class Backer:
@@ -438,7 +493,7 @@ class Backer:
             return False
         self.pfad = cache.pfad_aufloesen(domain.hydrokit.cache_pfad)
         if not self.pfad:
-            self.fehler = "No cache path set"
+            self.fehler = cache_fehlt_text(domain)
             return False
         self.sim, self.info, self._halter = _sim_aufbauen(self.scene, domain)
         if self.sim is None:
@@ -485,6 +540,18 @@ class Backer:
     @property
     def dauer(self):
         return time.time() - self.start if self.start else 0.0
+
+    def abschliessen(self):
+        """Note in info.json how long the bake took (shown in the panel), and
+        the End it ran to: schritt follows an End changed during the bake."""
+        if self.pfad and self.info is not None and self.start:
+            self.info["dauer"] = round(self.dauer, 1)
+            if self.info.get("frames"):
+                self.info["frames"] = [self.info["frames"][0], self.scene.frame_end]
+            try:
+                cache.info_schreiben(self.pfad, self.info)
+            except OSError:
+                pass
 
     def gpu_bericht(self):
         """(text, warning) about the GPU steps of this bake, or (None, False)."""
@@ -539,5 +606,6 @@ def backen(scene, fortschritt=None, abbruch=None):
         if fortschritt is not None:
             fortschritt(frame, b.fertig, b.gesamt)
     dauer = b.dauer
+    b.abschliessen()
     b.aufraeumen()
     return b.fertig, dauer, None

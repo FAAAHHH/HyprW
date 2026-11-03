@@ -4,6 +4,7 @@
 # These operators work on HyprW's OWN simulation layer
 # (hydrokit/sim/), not on FLIP Fluids. They need no FLIP add-on.
 
+import collections
 import os
 import time
 
@@ -23,6 +24,19 @@ class HYDROKIT_OT_set_type(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         return context.active_object is not None
+
+    @classmethod
+    def description(cls, context, properties):
+        """Each role button explains its role, a taken Domain who has it."""
+        if properties.typ == 'NONE':
+            return "Removes the role"
+        if properties.typ == 'DOMAIN':
+            vorhanden = geometrie.finde_domain(context.scene)
+            if vorhanden is not None and vorhanden is not context.active_object:
+                return f"'{vorhanden.name}' is already the domain. Clear its role there first"
+        typen = bpy.types.Object.bl_rna.properties["hydrokit"].fixed_type.bl_rna.properties["typ"]
+        eintrag = typen.enum_items.get(properties.typ)
+        return eintrag.description if eintrag is not None else cls.bl_description
 
     def execute(self, context):
         obj = context.active_object
@@ -50,6 +64,51 @@ class HYDROKIT_OT_set_type(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def dauer_text(sekunden):
+    s = int(round(sekunden))
+    if s < 60:
+        return f"{s} s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m} min {s:02d} s"
+    h, m = divmod(m, 60)
+    return f"{h} h {m:02d} min"
+
+
+def anzahl(n, wort):
+    """'1 frame', '2 frames'."""
+    return f"{n} {wort}" + ("" if n == 1 else "s")
+
+
+# The running bake. Module state like LINSE_LAEUFT, not scene properties: an
+# undo step during a bake brought back an older Scene.hydrokit.backt — the
+# bake stopped, or a baking box stayed after it with nothing running.
+# frame: the one being computed; start: where the bake began; ende: the
+# scene's End, live (Backer.schritt follows an End changed meanwhile).
+BAKE = {"laeuft": False, "abbrechen": False, "szene": "", "frame": 0,
+        "start": 1, "ende": 1, "sekunden": 0.0}
+
+
+def bake_stand():
+    """(frame line, time line) while baking — in the panel and the status
+    bar. The frame is the one being computed, numbered as in the timeline;
+    a range that does not start at 1 also counts from its start."""
+    frame, start, ende, sek = BAKE["frame"], BAKE["start"], BAKE["ende"], BAKE["sekunden"]
+    if start == 1:
+        zeile = f"Baking frame {frame} of {ende}"
+    else:
+        zeile = f"Baking frame {frame} ({frame - start + 1} of {ende - start + 1})"
+    if sek <= 0.0:
+        return zeile, ""
+    rest = max(ende - frame + 1, 0) * sek
+    return zeile, f"{sek:.1f} s per frame, about {dauer_text(rest)} left"
+
+
+# Frames the time left is averaged over: the waterfall's inflow keeps adding
+# water and whitewater, so later frames take longer than the first ones
+ZEIT_FRAMES = 10
+
+
 class HYDROKIT_OT_sim_bake(bpy.types.Operator):
     bl_idname = "hydrokit.sim_bake"
     bl_label = "Bake"
@@ -58,10 +117,19 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
 
     _timer = None
     _backer = None
+    _szene = None           # the baked scene, also when the window shows another
+    _zeiten = None          # seconds of the last frames (ZEIT_FRAMES)
+    _letzter = 0.0
 
     @classmethod
     def poll(cls, context):
-        return geometrie.finde_domain(context.scene) is not None
+        domain = geometrie.finde_domain(context.scene)
+        if domain is None or BAKE["laeuft"]:
+            return False
+        if not cache.pfad_aufloesen(domain.hydrokit.cache_pfad):
+            cls.poll_message_set(backen.cache_fehlt_text(domain))
+            return False
+        return True
 
     def execute(self, context):
         # In background mode there is no timer: compute in one go
@@ -69,7 +137,7 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
         if fehler:
             self.report({'ERROR'}, fehler)
             return {'CANCELLED'}
-        self.report({'INFO'}, f"{n} frames in {dauer:.1f}s")
+        self.report({'INFO'}, f"{anzahl(n, 'frame')} in {dauer:.1f}s")
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -77,16 +145,26 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
         if not self._backer.vorbereiten():
             self.report({'ERROR'}, self._backer.fehler or "Preparation failed")
             return {'CANCELLED'}
-        context.scene.hydrokit.backt = True
-        context.scene.hydrokit.bake_fortschritt = 0.0
+        self._szene = context.scene
+        BAKE.update(laeuft=True, abbrechen=False, szene=context.scene.name,
+                    start=self._backer.frame, sekunden=0.0)
+        self._stand_merken()
+        self._zeiten = collections.deque(maxlen=ZEIT_FRAMES)
+        self._letzter = time.time()
+        self._status(context)
         wm = context.window_manager
         self._timer = wm.event_timer_add(0.01, window=context.window)
         wm.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
+    def _stand_merken(self):
+        BAKE["frame"] = self._backer.frame
+        BAKE["ende"] = self._szene.frame_end
+
     def modal(self, context, event):
-        props = context.scene.hydrokit
-        if event.type == 'ESC' or not props.backt:
+        # Only the press: after Esc closed a menu or aborted a move, its
+        # release reached the bake as well and cancelled it
+        if (event.type == 'ESC' and event.value == 'PRESS') or BAKE["abbrechen"]:
             return self._beenden(context, abgebrochen=True)
         if event.type != 'TIMER':
             return {'PASS_THROUGH'}
@@ -95,7 +173,12 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, f"{type(e).__name__}: {e}")
             return self._beenden(context, abgebrochen=True)
-        props.bake_fortschritt = self._backer.fertig / max(self._backer.gesamt, 1)
+        jetzt = time.time()
+        self._zeiten.append(jetzt - self._letzter)
+        self._letzter = jetzt
+        BAKE["sekunden"] = sum(self._zeiten) / len(self._zeiten)
+        self._stand_merken()
+        self._status(context)
         for bereich in context.screen.areas:
             if bereich.type == 'VIEW_3D':
                 bereich.tag_redraw()
@@ -103,28 +186,72 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
             return self._beenden(context)
         return {'RUNNING_MODAL'}
 
+    def cancel(self, context):
+        """Opening a file ends the bake without modal(): only this runs. The
+        GPU memory goes back, the cache keeps what was baked so far."""
+        if self._timer is not None:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        BAKE.update(laeuft=False, abbrechen=False, sekunden=0.0)
+        if self._backer is not None:
+            try:
+                self._backer.abschliessen()
+                self._backer.aufraeumen()
+            except Exception as e:
+                print(f"HyprW: cleaning up the bake ({e})")
+            self._backer = None
+
+    def _status(self, context):
+        """The frame in Blender's status bar too, visible with the sidebar closed."""
+        frame, zeit = bake_stand()
+        text = f"HyprW: {frame}" + (f", {zeit}" if zeit else "") + "  (Esc cancels)"
+        try:
+            context.workspace.status_text_set(text)
+        except AttributeError:
+            pass
+
     def _beenden(self, context, abgebrochen=False):
         wm = context.window_manager
         if self._timer is not None:
             wm.event_timer_remove(self._timer)
             self._timer = None
-        props = context.scene.hydrokit
-        props.backt = False
-        props.bake_fortschritt = 0.0
+        try:
+            context.workspace.status_text_set(None)
+        except AttributeError:
+            pass
+        BAKE.update(laeuft=False, abbrechen=False, sekunden=0.0)
+        szene = self._szene
         n, dauer = self._backer.fertig, self._backer.dauer
         verdickt = (self._backer.info or {}).get("verdickt", [])
         gpu_text, gpu_warnung = self._backer.gpu_bericht()
+        # before the lens job: its drops count as current when they are
+        # newer than info.json (linse.ist_aktuell)
+        self._backer.abschliessen()
         self._backer.aufraeumen()
         self._backer = None
         anzeige.handler_an()
-        if context.scene.camera is not None and \
-                geometrie.finde_domain(context.scene).hydrokit.linse_an:
+        anzeige.frame_laden(szene)
+        # The lens job and the look work on the window's scene: only while
+        # it still shows the baked one (else Apply Look there later)
+        gleich = context.scene == szene
+        domain = geometrie.finde_domain(szene)
+        if gleich and szene.camera is not None and domain is not None and domain.hydrokit.linse_an:
             linse_im_hintergrund_starten()     # step by step, Blender stays usable
-        anzeige.frame_laden(context.scene)
+        # New whitewater gets its look at once: bare points render black
+        from ..sim import aussehen
+        look = False
+        if gleich:
+            try:
+                look = aussehen.nach_bake(context)
+            except Exception as e:
+                print(f"HyprW: no look after the bake ({e}); press Apply Look")
         if abgebrochen:
-            self.report({'WARNING'}, f"Cancelled after {n} frames")
+            self.report({'WARNING'}, f"Cancelled after {anzahl(n, 'frame')}"
+                                     + (" — look applied" if look else ""))
             return {'CANCELLED'}
-        teile = [f"{n} frames in {dauer:.1f}s"]
+        teile = [f"{anzahl(n, 'frame')} in {dauer:.1f}s"]
+        if look:
+            teile.append("look applied")
         if gpu_text:
             teile.append(gpu_text)
         if verdickt:
@@ -139,7 +266,7 @@ class HYDROKIT_OT_sim_stop(bpy.types.Operator):
     bl_description = "Stops the running bake"
 
     def execute(self, context):
-        context.scene.hydrokit.backt = False
+        BAKE["abbrechen"] = True        # the bake's modal ends on its next event
         return {'FINISHED'}
 
 
@@ -154,23 +281,30 @@ class HYDROKIT_OT_sim_clear(bpy.types.Operator):
         return geometrie.finde_domain(context.scene) is not None
 
     def invoke(self, context, event):
-        return context.window_manager.invoke_confirm(self, event)
+        dom = geometrie.finde_domain(context.scene)
+        n = len(cache.gebackene_frames(cache.pfad_aufloesen(dom.hydrokit.cache_pfad)))
+        return context.window_manager.invoke_confirm(
+            self, event, title="Delete Bake",
+            message=f"Delete {'the' if n == 1 else 'all'} {anzahl(n, 'baked frame')}?",
+            confirm_text="Delete", icon='WARNING')
 
     def execute(self, context):
         dom = geometrie.finde_domain(context.scene)
         pfad = cache.pfad_aufloesen(dom.hydrokit.cache_pfad)
         n = len(cache.gebackene_frames(pfad))
         cache.leeren(pfad)
-        anzeige.frame_laden(context.scene)
-        self.report({'INFO'}, f"{n} frames deleted")
+        # frame_laden stops without info.json: emptied here, else the
+        # viewport and every render kept showing the deleted frame
+        anzeige.ergebnisse_leeren()
+        self.report({'INFO'}, f"{anzahl(n, 'frame')} deleted")
         return {'FINISHED'}
 
 
 class HYDROKIT_OT_sim_display(bpy.types.Operator):
     bl_idname = "hydrokit.sim_display"
     bl_label = "Refresh Display"
-    bl_description = ("Loads the current frame from the cache and keeps the "
-                      "display up to date while scrubbing")
+    bl_description = ("Loads the current frame from the cache and makes the "
+                      "viewport follow the timeline again")
 
     def execute(self, context):
         anzeige.handler_an()
@@ -204,6 +338,54 @@ class HYDROKIT_OT_sim_look(bpy.types.Operator):
             self.report({'WARNING'}, "Nothing found — bake first")
             return {'CANCELLED'}
         self.report({'INFO'}, ", ".join(f"{k} {v}" for k, v in erledigt.items()))
+        return {'FINISHED'}
+
+
+def gewaehltes_wasser(context):
+    """The baked water, if it is selected or active: Apply Water acts on the
+    water clicked on purpose, like a material on the selected object. It
+    stays clickable while foam, spray and mist are click-through
+    (sim/anzeige.py, waehlbar_machen)."""
+    flaeche = bpy.data.objects.get(anzeige.OBERFLAECHE)
+    if flaeche is None:
+        return None
+    # The view layer's active object: the 3D view's active_object is None
+    # for a hidden one
+    if context.view_layer.objects.active is flaeche:
+        return flaeche
+    try:
+        return flaeche if flaeche.select_get() else None
+    except RuntimeError:
+        return None         # not in the current view layer
+
+
+class HYDROKIT_OT_sim_water(bpy.types.Operator):
+    bl_idname = "hydrokit.sim_water"
+    bl_label = "Apply Water"
+    bl_description = (
+        "Gives the selected water the chosen water — click the water in the "
+        "viewport first. Foam, bubbles, spray and mist stay as they are. Does "
+        "not need a new bake"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        if bpy.data.objects.get(anzeige.OBERFLAECHE) is None:
+            cls.poll_message_set("No water yet: bake first")
+            return False
+        if gewaehltes_wasser(context) is None:
+            cls.poll_message_set("Click the water in the viewport first")
+            return False
+        return True
+
+    def execute(self, context):
+        from ..sim import aussehen
+        name = aussehen.wasser_anwenden(context)
+        if name is None:
+            self.report({'WARNING'}, "No water yet: bake first")
+            return {'CANCELLED'}
+        self.report({'INFO'}, f"Water: {name}")
         return {'FINISHED'}
 
 
@@ -257,7 +439,7 @@ class HYDROKIT_OT_linse_berechnen(bpy.types.Operator):
 
     def modal(self, context, event):
         props = context.scene.hydrokit
-        if event.type == 'ESC':
+        if event.type == 'ESC' and event.value == 'PRESS':
             return self._fertig(context, None, abgebrochen=True)
         if event.type != 'TIMER':
             return {'PASS_THROUGH'}
@@ -396,7 +578,7 @@ class HYDROKIT_OT_rechengeraet_messen(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         return (geometrie.finde_domain(context.scene) is not None
-                and not context.scene.hydrokit.backt and not MESSUNG["laeuft"])
+                and not BAKE["laeuft"] and not MESSUNG["laeuft"])
 
     def _ohne_gpu(self, domain):
         """No usable GPU: everything on the CPU, nothing to measure."""
@@ -433,7 +615,7 @@ class HYDROKIT_OT_rechengeraet_messen(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
-        if event.type == 'ESC':
+        if event.type == 'ESC' and event.value == 'PRESS':
             self._prozess.kill()
             self._aufraeumen(context)
             _probe_lesen(self._ordner, self._ergebnis)
@@ -465,6 +647,14 @@ class HYDROKIT_OT_rechengeraet_messen(bpy.types.Operator):
             context.window_manager.event_timer_remove(self._timer)
             self._timer = None
 
+    def cancel(self, context):
+        """Opening a file ends the measurement without modal(): stop the probe
+        and remove its copy of the file."""
+        if self._prozess is not None:
+            self._prozess.kill()
+            self._aufraeumen(context)
+            _probe_lesen(self._ordner, self._ergebnis)
+
     def _fertig(self, context, daten):
         if daten.get("error"):
             self.report({'ERROR'}, "Measurement failed: " + daten["error"])
@@ -476,8 +666,8 @@ class HYDROKIT_OT_rechengeraet_messen(bpy.types.Operator):
 
 
 classes = (HYDROKIT_OT_set_type, HYDROKIT_OT_linse_berechnen, HYDROKIT_OT_sim_bake, HYDROKIT_OT_sim_stop,
-           HYDROKIT_OT_sim_clear, HYDROKIT_OT_sim_display,
-           HYDROKIT_OT_sim_look, HYDROKIT_OT_rechengeraet_messen)
+           HYDROKIT_OT_sim_clear, HYDROKIT_OT_sim_display, HYDROKIT_OT_sim_look,
+           HYDROKIT_OT_sim_water, HYDROKIT_OT_rechengeraet_messen)
 
 
 def register():

@@ -1,4 +1,4 @@
-# HyprW — water and whitewater materials
+# HyprW — the water material
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # The shaders are built in code instead of shipped as a .blend:
@@ -7,7 +7,6 @@
 # - adapts to Blender versions (Transmission is named differently in 4.x than in 3.x)
 
 import bpy
-from ..utils import flip_bridge
 
 PREFIX = "HK "
 
@@ -56,16 +55,6 @@ WASSER_VARIANTEN = {
 }
 
 
-# Whitewater type -> (material name, base roughness, transmission, bubble size,
-#                     bump, translucency)
-GISCHT_MATERIALIEN = {
-    "foam":   ("Schaum", 0.80, 0.00, 120.0, 0.60, 0.45),
-    "bubble": ("Blasen", 0.25, 0.80,  60.0, 0.35, 0.70),
-    "spray":  ("Spray",  0.15, 0.55, 240.0, 0.20, 0.55),
-    "dust":   ("Staub",  1.00, 0.45, 400.0, 0.05, 0.80),
-}
-
-
 def _transmission_key(inputs):
     """The input is named differently depending on the Blender version."""
     for key in ("Transmission Weight", "Transmission"):
@@ -75,12 +64,118 @@ def _transmission_key(inputs):
 
 
 def _neues_material(name):
+    from ..sim.aussehen import MATERIAL_STAND, STAND_KEY
     mat = bpy.data.materials.get(name)
     if mat is None:
         mat = bpy.data.materials.new(name)
     mat.use_nodes = True
     mat.node_tree.nodes.clear()
+    # drivers of the old nodes (animated ripples) would otherwise remain
+    mat.node_tree.animation_data_clear()
+    mat[STAND_KEY] = MATERIAL_STAND
+    mat.pop(WASSER_STAND_KEY, None)     # set again only by wasser_aus_einstellungen
     return mat
+
+
+# --- Studio look: the principle of studio water materials (light through the
+# surface, fine ripples, optional dispersion), with water's measured values.
+#
+# Fine ripples below the simulation resolution are capillary-gravity waves.
+# At lambda = 2 pi sqrt(sigma / (rho g)) = 1.71 cm both restoring forces are
+# equal and the phase speed has its minimum (4 g sigma / rho)^(1/4) = 23 cm/s
+# (sigma = 72.75 mN/m at 20 °C, Vargaftik, Volkov & Voljak 1983, J. Phys. Chem.
+# Ref. Data 12:817; dispersion relation of capillary-gravity waves, Lamb 1932,
+# Hydrodynamics).
+KAPILLAR_WELLENLAENGE = 0.0171
+KAPILLAR_TEMPO = 0.231
+# Ripple height at slider 1 — APPROXIMATION (wave steepness k a = 0.18)
+KAPILLAR_HOEHE = 0.0005
+# Refractive index of water at 20 °C for red, green and blue (640, 550 and
+# 465 nm), from the Sellmeier fit of Daimon & Masumura 2007, Appl. Opt.
+# 46:3811 (Abbe number 55.8). Blender 5.2 has no dispersion input yet.
+WASSER_IOR_RGB = (1.33192, 1.33468, 1.33867)
+# Caustic line pattern (1 - |2 noise - 1| / 0.05)^2 of a noise with detail
+# 2: thin bright lines on a dark ground. Its mean over a rendered plane is
+# 0.0938 (measured 02.11.2026, 2 m plane, 15 cm cells), so this factor keeps
+# the mean brightness on the ground. The pattern itself is an APPROXIMATION.
+KAUSTIK_LINIE = 0.05
+KAUSTIK_NORMIERUNG = 1.0 / 0.0938
+
+
+# The scene's water settings a water material is built from. The material
+# keeps them (WASSER_STAND_KEY), so the panel can say when a slider has moved
+# since Apply Water.
+WASSER_EINSTELLUNGEN = ("wasser_variante", "wasser_sichtweite", "wasser_geloest",
+                        "wasser_kraeuselung", "wasser_schatten", "wasser_kaustik",
+                        "wasser_kaustik_groesse", "wasser_wellen", "wasser_dispersion")
+WASSER_STAND_KEY = "hk_wasser"
+
+
+def wasser_aus_einstellungen(scene, variante=None):
+    """The water material from the scene's water sliders."""
+    p = scene.hydrokit
+    fps = scene.render.fps / max(scene.render.fps_base, 1e-6)
+    mat = baue_wasser(variante or p.wasser_variante, p.wasser_kraeuselung,
+                      p.wasser_sichtweite, p.wasser_geloest,
+                      schatten=p.wasser_schatten, kaustik=p.wasser_kaustik,
+                      kaustik_groesse=p.wasser_kaustik_groesse, wellen=p.wasser_wellen,
+                      dispersion=p.wasser_dispersion, fps=fps)
+    stand = {k: getattr(p, k) for k in WASSER_EINSTELLUNGEN}
+    stand["wasser_variante"] = variante or p.wasser_variante
+    stand["wasser_dispersion"] = int(p.wasser_dispersion)
+    mat[WASSER_STAND_KEY] = stand
+    return mat
+
+
+def wasser_stand(scene, flaeche):
+    """(name of the applied water, names of the settings changed since) for
+    the panel; (None, []) without a water material. Materials from before
+    02.11.2026 carry no settings: only their water is known then."""
+    import math
+    mat = next((m for m in flaeche.data.materials if m is not None), None) if flaeche else None
+    if mat is None:
+        return None, []
+    p = scene.hydrokit
+    varianten = p.bl_rna.properties["wasser_variante"].enum_items
+    gespeichert = mat.get(WASSER_STAND_KEY)
+    if gespeichert is None:
+        variante = next((k for k, (kurz, *_) in WASSER_VARIANTEN.items()
+                         if mat.name == PREFIX + kurz), None)
+        return (varianten[variante].name if variante else mat.name), []
+    gespeichert = gespeichert.to_dict()
+    variante = gespeichert.get("wasser_variante")
+    offen = []
+    for k in WASSER_EINSTELLUNGEN:
+        if k not in gespeichert:
+            continue
+        alt, jetzt = gespeichert[k], getattr(p, k)
+        if isinstance(jetzt, bool):
+            gleich = bool(alt) == jetzt
+        elif isinstance(jetzt, float):
+            gleich = math.isclose(float(alt), jetzt, rel_tol=1e-4, abs_tol=1e-9)
+        else:
+            gleich = alt == jetzt
+        if not gleich:
+            offen.append(p.bl_rna.properties[k].name)
+    name = varianten[variante].name if variante in varianten.keys() else mat.name
+    return name, offen
+
+
+def _zeit_treiber(eingang, schwingungen_pro_sekunde, fps):
+    """Animates a 4D noise: W advances with the scene time."""
+    fc = eingang.driver_add("default_value")
+    fc.driver.type = 'SCRIPTED'
+    fc.driver.expression = f"frame*{schwingungen_pro_sekunde / max(fps, 1e-6):.6f}"
+
+
+def _rauschen_4d(nt, koord, groesse, ort, detail=3.0):
+    noise = nt.nodes.new("ShaderNodeTexNoise"); noise.location = ort
+    noise.noise_dimensions = '4D'
+    noise.inputs["Scale"].default_value = 1.0 / max(groesse, 1e-4)
+    noise.inputs["Detail"].default_value = detail
+    noise.inputs["Roughness"].default_value = 0.5
+    nt.links.new(koord.outputs["Object"], noise.inputs["Vector"])
+    return noise
 
 
 def wasser_optik(sichtweite, geloest):
@@ -113,44 +208,132 @@ def volumen_strahlen(scene):
         c.max_bounces = VOLUMEN_STRAHLEN
 
 
-def baue_wasser(variante='GEBIRGSBACH', kraeuselung=0.035, sichtweite=None, geloest=None):
+def baue_wasser(variante='GEBIRGSBACH', kraeuselung=0.035, sichtweite=None, geloest=None,
+                schatten=1.0, kaustik=0.5, kaustik_groesse=0.15, wellen=1.0,
+                dispersion=False, fps=24.0):
     """Water material: a clear surface (IOR 1.333) over a volume that
     absorbs and scatters as measured (see wasser_optik). sichtweite and
-    geloest default to the variant's values."""
+    geloest default to the variant's values.
+
+    schatten: share of sunlight that passes the surface to the ground
+    (shadow rays; the volume still absorbs them); kaustik: strength of the
+    caustic pattern on it, kaustik_groesse its cell size in m; wellen:
+    height of the capillary ripples (1 = KAPILLAR_HOEHE); dispersion: one
+    refraction per colour channel (WASSER_IOR_RGB)."""
     kurzname, sicht0, geloest0 = WASSER_VARIANTEN[variante]
     absorption, streuung = wasser_optik(sicht0 if sichtweite is None else sichtweite,
                                         geloest0 if geloest is None else geloest)
     mat = _neues_material(PREFIX + kurzname)
     nt = mat.node_tree
 
-    out = nt.nodes.new("ShaderNodeOutputMaterial"); out.location = (820, 0)
-    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled"); bsdf.location = (420, 180)
+    out = nt.nodes.new("ShaderNodeOutputMaterial"); out.location = (1220, 0)
+    koord = nt.nodes.new("ShaderNodeTexCoord"); koord.location = (-780, 0)
 
-    i = bsdf.inputs
-    i["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-    # A tiny roughness: at 0 the surface is a perfect mirror and in a plain
-    # scene looks like liquid metal
-    i["Roughness"].default_value = kraeuselung
-    i["IOR"].default_value = 1.333          # water, not glass (1.45)
-    key = _transmission_key(i)
-    if key:
-        i[key].default_value = 1.0
+    # Capillary ripples: a 4D noise at their wavelength, moving on at their
+    # frequency c / lambda, as a bump of their height
+    wellen_rauschen = _rauschen_4d(nt, koord, KAPILLAR_WELLENLAENGE, (-560, 120))
+    _zeit_treiber(wellen_rauschen.inputs["W"], KAPILLAR_TEMPO / KAPILLAR_WELLENLAENGE, fps)
+    bump = nt.nodes.new("ShaderNodeBump"); bump.location = (-340, 120)
+    bump.inputs["Strength"].default_value = 1.0 if wellen > 0.0 else 0.0
+    bump.inputs["Distance"].default_value = KAPILLAR_HOEHE * wellen
+    nt.links.new(wellen_rauschen.outputs["Fac"], bump.inputs["Height"])
+    normale = bump.outputs["Normal"]
 
-    # Fine surface disturbance: breaks up the reflection without making the
-    # water matte. Scale deliberately kept small.
-    koord = nt.nodes.new("ShaderNodeTexCoord"); koord.location = (-380, -40)
-    noise = nt.nodes.new("ShaderNodeTexNoise"); noise.location = (-180, -40)
-    noise.inputs["Scale"].default_value = 90.0
-    noise.inputs["Detail"].default_value = 6.0
-    if "Roughness" in noise.inputs:
-        noise.inputs["Roughness"].default_value = 0.6
-    bump = nt.nodes.new("ShaderNodeBump"); bump.location = (120, -40)
-    bump.inputs["Strength"].default_value = 0.12
-    bump.inputs["Distance"].default_value = 0.004
-    nt.links.new(koord.outputs["Object"], noise.inputs["Vector"])
-    nt.links.new(noise.outputs["Fac"], bump.inputs["Height"])
-    nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
-    nt.links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
+    if dispersion:
+        # One glass per colour channel with that channel's refractive index
+        oberflaeche = None
+        for kanal, ior in enumerate(WASSER_IOR_RGB):
+            glas = nt.nodes.new("ShaderNodeBsdfGlass"); glas.location = (180, 360 - 180 * kanal)
+            glas.inputs["Color"].default_value = tuple(1.0 if c == kanal else 0.0 for c in range(3)) + (1.0,)
+            glas.inputs["Roughness"].default_value = kraeuselung
+            glas.inputs["IOR"].default_value = ior
+            nt.links.new(normale, glas.inputs["Normal"])
+            if oberflaeche is None:
+                oberflaeche = glas.outputs["BSDF"]
+            else:
+                summe = nt.nodes.new("ShaderNodeAddShader"); summe.location = (380, 300 - 120 * kanal)
+                nt.links.new(oberflaeche, summe.inputs[0])
+                nt.links.new(glas.outputs["BSDF"], summe.inputs[1])
+                oberflaeche = summe.outputs["Shader"]
+    else:
+        bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled"); bsdf.location = (180, 260)
+        i = bsdf.inputs
+        i["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+        # A tiny roughness: at 0 the surface is a perfect mirror and in a
+        # plain scene looks like liquid metal
+        i["Roughness"].default_value = kraeuselung
+        i["IOR"].default_value = 1.333          # water, not glass (1.45)
+        key = _transmission_key(i)
+        if key:
+            i[key].default_value = 1.0
+        nt.links.new(normale, i["Normal"])
+        oberflaeche = bsdf.outputs["BSDF"]
+
+    if schatten > 0.0:
+        # LIGHT THROUGH THE SURFACE. Cycles can hardly find the paths that
+        # refract sunlight through a wavy surface onto the ground (caustics):
+        # the ground under water stays dark and noisy. Shadow rays therefore
+        # pass the surface, weakened by its Fresnel reflection; the volume
+        # below absorbs and scatters them as measured. Render approximation.
+        weg = nt.nodes.new("ShaderNodeLightPath"); weg.location = (400, 620)
+        fresnel = nt.nodes.new("ShaderNodeFresnel"); fresnel.location = (-120, -160)
+        fresnel.inputs["IOR"].default_value = 1.333
+        nt.links.new(normale, fresnel.inputs["Normal"])
+        durch = nt.nodes.new("ShaderNodeMath"); durch.location = (80, -160)
+        durch.operation = 'SUBTRACT'
+        durch.inputs[0].default_value = 1.0
+        nt.links.new(fresnel.outputs["Fac"], durch.inputs[1])
+        licht = durch.outputs["Value"]
+        if kaustik > 0.0:
+            # Caustic network: bright lines where the noise crosses 0.5,
+            # normalised to a mean of 1, faded in with the strength. Cells of
+            # the given size, moving on at the frequency of gravity waves of
+            # that length, sqrt(g / (2 pi lambda)).
+            k_rauschen = _rauschen_4d(nt, koord, kaustik_groesse, (-560, -360), detail=2.0)
+            _zeit_treiber(k_rauschen.inputs["W"],
+                          (9.81 / (2.0 * 3.141592653589793 * max(kaustik_groesse, 1e-3))) ** 0.5, fps)
+            mitte = nt.nodes.new("ShaderNodeMath"); mitte.location = (-340, -360)
+            mitte.operation = 'MULTIPLY_ADD'
+            mitte.inputs[1].default_value = 2.0
+            mitte.inputs[2].default_value = -1.0
+            nt.links.new(k_rauschen.outputs["Fac"], mitte.inputs[0])
+            betrag = nt.nodes.new("ShaderNodeMath"); betrag.location = (-160, -360)
+            betrag.operation = 'ABSOLUTE'
+            nt.links.new(mitte.outputs["Value"], betrag.inputs[0])
+            linie = nt.nodes.new("ShaderNodeMapRange"); linie.location = (20, -360)
+            linie.clamp = True
+            linie.inputs["From Min"].default_value = 0.0
+            linie.inputs["From Max"].default_value = KAUSTIK_LINIE
+            linie.inputs["To Min"].default_value = 1.0
+            linie.inputs["To Max"].default_value = 0.0
+            nt.links.new(betrag.outputs["Value"], linie.inputs["Value"])
+            quadrat = nt.nodes.new("ShaderNodeMath"); quadrat.location = (200, -360)
+            quadrat.operation = 'POWER'
+            quadrat.inputs[1].default_value = 2.0
+            nt.links.new(linie.outputs["Result"], quadrat.inputs[0])
+            faktor = nt.nodes.new("ShaderNodeMath"); faktor.location = (380, -360)
+            faktor.operation = 'MULTIPLY_ADD'
+            faktor.inputs[1].default_value = kaustik * KAUSTIK_NORMIERUNG
+            faktor.inputs[2].default_value = 1.0 - kaustik
+            nt.links.new(quadrat.outputs["Value"], faktor.inputs[0])
+            mal = nt.nodes.new("ShaderNodeMath"); mal.location = (560, -200)
+            mal.operation = 'MULTIPLY'
+            nt.links.new(licht, mal.inputs[0])
+            nt.links.new(faktor.outputs["Value"], mal.inputs[1])
+            licht = mal.outputs["Value"]
+        klar = nt.nodes.new("ShaderNodeBsdfTransparent"); klar.location = (760, -120)
+        nt.links.new(licht, klar.inputs["Color"])
+        anteil = nt.nodes.new("ShaderNodeMath"); anteil.location = (760, 560)
+        anteil.operation = 'MULTIPLY'
+        anteil.inputs[1].default_value = schatten
+        nt.links.new(weg.outputs["Is Shadow Ray"], anteil.inputs[0])
+        mischen = nt.nodes.new("ShaderNodeMixShader"); mischen.location = (980, 200)
+        nt.links.new(anteil.outputs["Value"], mischen.inputs["Fac"])
+        nt.links.new(oberflaeche, mischen.inputs[1])
+        nt.links.new(klar.outputs["BSDF"], mischen.inputs[2])
+        oberflaeche = mischen.outputs["Shader"]
+
+    nt.links.new(oberflaeche, out.inputs["Surface"])
 
     # Volume Absorption takes density x (1 - colour) per channel
     dichte = max(absorption)
@@ -172,133 +355,12 @@ def baue_wasser(variante='GEBIRGSBACH', kraeuselung=0.035, sichtweite=None, gelo
     return mat
 
 
-def baue_gischt(art):
-    """Whitewater is white, ROUGH and STRUCTURED.
-
-    A single white Principled node looks like styrofoam. Foam is a mass of
-    bubbles: Voronoi provides the cell structure, the bump comes from it.
-    Plus translucency, because wet foam lets light through — without it
-    it looks like chalk.
-    """
-    kurzname, rauheit, transmission, zellen, woelbung, durchschein = \
-        GISCHT_MATERIALIEN[art]
-    mat = _neues_material(PREFIX + kurzname)
-    nt = mat.node_tree
-
-    out = nt.nodes.new("ShaderNodeOutputMaterial"); out.location = (620, 0)
-    bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled"); bsdf.location = (300, 0)
-
-    i = bsdf.inputs
-    i["Base Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-    i["Roughness"].default_value = rauheit
-    i["IOR"].default_value = 1.333
-    key = _transmission_key(i)
-    if key:
-        i[key].default_value = transmission
-
-    # Translucency: the difference between wet foam and chalk. A Translucent
-    # BSDF, not subsurface: FLIP draws whitewater as a point cloud, and
-    # Cycles on the GPU renders subsurface on points black (see
-    # sim/aussehen.py, schaum_optik)
-    durch = nt.nodes.new("ShaderNodeBsdfTranslucent"); durch.location = (300, -260)
-    durch.inputs["Color"].default_value = (0.82, 0.92, 1.0, 1.0)
-    beide = nt.nodes.new("ShaderNodeMixShader"); beide.location = (480, 0)
-    beide.inputs[0].default_value = durchschein
-    nt.links.new(bsdf.outputs["BSDF"], beide.inputs[1])
-    nt.links.new(durch.outputs["BSDF"], beide.inputs[2])
-
-    koord = nt.nodes.new("ShaderNodeTexCoord"); koord.location = (-620, 0)
-
-    # Bubble structure
-    vor = nt.nodes.new("ShaderNodeTexVoronoi"); vor.location = (-420, 120)
-    vor.feature = 'F1'
-    vor.inputs["Scale"].default_value = zellen
-    nt.links.new(koord.outputs["Object"], vor.inputs["Vector"])
-
-    # fine unrest on top, so the cells do not look regular
-    noise = nt.nodes.new("ShaderNodeTexNoise"); noise.location = (-420, -180)
-    noise.inputs["Scale"].default_value = zellen * 2.5
-    noise.inputs["Detail"].default_value = 8.0
-    nt.links.new(koord.outputs["Object"], noise.inputs["Vector"])
-
-    misch = nt.nodes.new("ShaderNodeMix"); misch.location = (-200, 0)
-    misch.data_type = 'FLOAT'
-    misch.inputs["Factor"].default_value = 0.35
-    nt.links.new(vor.outputs["Distance"], misch.inputs[2])
-    nt.links.new(noise.outputs["Fac"], misch.inputs[3])
-
-    bump = nt.nodes.new("ShaderNodeBump"); bump.location = (40, -160)
-    bump.inputs["Strength"].default_value = woelbung
-    bump.inputs["Distance"].default_value = 0.02
-    nt.links.new(misch.outputs[0], bump.inputs["Height"])
-    nt.links.new(bump.outputs["Normal"], bsdf.inputs["Normal"])
-    nt.links.new(bump.outputs["Normal"], durch.inputs["Normal"])
-
-    # Vary roughness too: bubble tops shine, the gaps in between are matte
-    rough = nt.nodes.new("ShaderNodeMapRange"); rough.location = (40, 160)
-    rough.inputs["From Min"].default_value = 0.0
-    rough.inputs["From Max"].default_value = 1.0
-    rough.inputs["To Min"].default_value = max(rauheit - 0.18, 0.02)
-    rough.inputs["To Max"].default_value = min(rauheit + 0.12, 1.0)
-    nt.links.new(misch.outputs[0], rough.inputs["Value"])
-    nt.links.new(rough.outputs["Result"], bsdf.inputs["Roughness"])
-
-    out.location = (700, 0)
-    nt.links.new(beide.outputs["Shader"], out.inputs["Surface"])
-    return mat
-
-
-class HYDROKIT_OT_apply_materials(bpy.types.Operator):
-    bl_idname = "hydrokit.apply_materials"
-    bl_label = "Apply Materials"
-    bl_description = (
-        "Creates water and whitewater materials and assigns them to the "
-        "FLIP Fluids objects. Does not need a new bake"
-    )
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return flip_bridge.get_domain(context) is not None
-
-    def execute(self, context):
-        props = context.scene.hydrokit
-        erledigt = []
-
-        surface = flip_bridge.get_surface_object(context)
-        if surface is not None and surface.type == 'MESH':
-            mat = baue_wasser(props.wasser_variante, props.wasser_kraeuselung,
-                              props.wasser_sichtweite, props.wasser_geloest)
-            volumen_strahlen(context.scene)
-            surface.data.materials.clear()
-            surface.data.materials.append(mat)
-            erledigt.append(mat.name)
-
-        nicht_gesetzt = []
-        for art, obj in flip_bridge.get_whitewater_objects(context).items():
-            mat = baue_gischt(art)
-            if flip_bridge.set_whitewater_material(obj, mat):
-                erledigt.append(mat.name)
-            else:
-                nicht_gesetzt.append(art)
-
-        if not erledigt:
-            self.report({'WARNING'}, "No objects found that anything fits")
-            return {'CANCELLED'}
-        if nicht_gesetzt:
-            self.report({'WARNING'}, "Cannot be assigned: " + ", ".join(nicht_gesetzt))
-        self.report({'INFO'}, f"{len(erledigt)} materials set")
-        return {'FINISHED'}
-
-
-classes = (HYDROKIT_OT_apply_materials,)
-
-
 def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
+    # Rebuild an outdated look when a file is opened (aussehen.MATERIAL_STAND)
+    from ..sim import anzeige
+    anzeige.lade_handler_an()
 
 
 def unregister():
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+    from ..sim import anzeige
+    anzeige.lade_handler_aus()

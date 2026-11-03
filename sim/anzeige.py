@@ -25,13 +25,15 @@ ARTEN = {
 
 # Objects that only show the bake. Click-through in the viewport: the mist
 # volume covers the whole scene, and every click inside the domain picked it
-# (then water, foam, spray) before the object the user meant.
+# (then foam, spray) before the object the user meant. The water itself
+# stays clickable: click it, then Apply Water.
 ERGEBNISSE = (OBERFLAECHE,) + tuple(a[1] for a in ARTEN.values()) + ("HK_Linsentropfen",)
 
 
 def waehlbar_machen(obj, scene):
-    """Result objects selectable only with Selectable Results switched on."""
-    soll = not getattr(scene.hydrokit, "ergebnisse_waehlbar", False)
+    """Foam, bubbles, spray, mist and lens drops selectable only with
+    Selectable Results switched on; the water always."""
+    soll = obj.name != OBERFLAECHE and not getattr(scene.hydrokit, "ergebnisse_waehlbar", False)
     if obj.hide_select != soll:
         obj.hide_select = soll
 
@@ -199,18 +201,44 @@ def _punkte_setzen(obj, punkte, zufall=None, tempo=None, groesse=None):
     return n
 
 
-def gischt_laden(scene, pfad, versatz, frame, nebel_engine=False):
+def _gischt_leeren():
+    """A frame or a bake without whitewater: nothing left over from another
+    frame. After an Esc-cancelled bake, frozen foam hung in the air on every
+    later frame and in every render."""
+    import numpy as np
+    leer = np.zeros((0, 3), np.float32)
+    gefunden = {}
+    for _, name, _ in ARTEN.values():
+        obj = bpy.data.objects.get(name)
+        if obj is not None and len(obj.data.vertices):
+            gefunden[name] = _punkte_setzen(obj, leer)
+    return gefunden
+
+
+def ergebnisse_leeren():
+    """Clear Cache: water, whitewater and lens drops without geometry. Their
+    look (materials, modifiers) stays for the next bake."""
+    for name in ERGEBNISSE:
+        obj = bpy.data.objects.get(name)
+        if obj is not None and obj.type == 'MESH':
+            obj.data.clear_geometry()
+            obj.data.update()
+
+
+def gischt_laden(scene, pfad, versatz, frame, nebel_engine=False, daten=None):
     """Split particles by type and show the configured amount.
 
     Filtering uses the ID (one byte per particle), not the index: the ID
     stays with the particle for its lifetime, so at 50 % the same half stays
     visible while scrubbing. A filter by index would catch different particles
-    on every frame and flicker visibly.
+    on every frame and flicker visibly. daten: the frame's particles if
+    already read (gischt_neu).
     """
     import numpy as np
-    daten = cache.partikel_lesen(pfad, frame)
     if daten is None:
-        return {}
+        daten = cache.partikel_lesen(pfad, frame)
+    if daten is None:
+        return _gischt_leeren()
     roh_pos, roh_vel, roh_leben, roh_kenn, roh_arten = daten
     n = len(roh_kenn)
     gefunden = {}
@@ -296,6 +324,52 @@ def gischt_laden(scene, pfad, versatz, frame, nebel_engine=False):
     return gefunden
 
 
+# The particles of the frame whose amount slider is being dragged: read once,
+# then only the ID mask runs again for every slider step
+_GEZOGEN = {}
+
+
+def gischt_neu(scene):
+    """Amount sliders: only the whitewater of the current frame again — not
+    the surface mesh (expensive at Mesh Detail 3) or the lens drops."""
+    import os
+    domain = geometrie.finde_domain(scene)
+    if domain is None:
+        return None
+    pfad = cache.pfad_aufloesen(domain.hydrokit.cache_pfad)
+    info = cache.info_lesen(pfad)
+    if info is None or not info.get("gischt"):
+        return None
+    frame = scene.frame_current
+    datei = cache.partikel_datei(pfad, frame)
+    try:
+        schluessel = (datei, os.stat(datei).st_mtime_ns)
+    except OSError:
+        return None
+    if _GEZOGEN.get("schluessel") != schluessel:
+        _GEZOGEN.clear()
+        _GEZOGEN["daten"] = cache.partikel_lesen(pfad, frame)
+        _GEZOGEN["schluessel"] = schluessel
+    return gischt_laden(scene, pfad, info.get("versatz", [0.0, 0.0, 0.0]), frame,
+                        info.get("nebel_engine", False), _GEZOGEN["daten"])
+
+
+def _viewport_mesh(d, info):
+    """The viewport shows the second mesh when the user asks for that kind
+    and the bake wrote it (info.json "netz", sim/backen.py): Coarse Preview,
+    or Lighter Viewport below the mesh detail. Otherwise the full mesh."""
+    netz = (info or {}).get("netz")
+    # caches from before 02.11.2026 only ever held the coarse preview
+    art = netz.get("vorschau") if netz is not None else "grob"
+    if getattr(d, "vorschau_im_viewport", False):
+        return art == "grob"
+    if (getattr(d, "viewport_eigenes_netz", False)
+            and getattr(d, "unterteilung_viewport", 1)
+            < max(1, getattr(d, "oberflaechen_unterteilung", 1))):
+        return art == "leicht"
+    return False
+
+
 def frame_laden(scene, frame=None):
     """Fetch surface and whitewater of the frame from the cache."""
     geometrie.hilfsobjekte_unsichtbar(scene)
@@ -312,9 +386,9 @@ def frame_laden(scene, frame=None):
 
     ergebnis = {}
     obj = _objekt_holen(OBERFLAECHE, scene)
-    # The coarse preview mesh in the viewport, the full one when rendering.
+    # The lighter viewport mesh in the viewport, the full one when rendering.
     daten = None
-    if not _rendert and getattr(domain.hydrokit, "vorschau_im_viewport", False):
+    if not _rendert and _viewport_mesh(domain.hydrokit, info):
         daten = cache.mesh_lesen_np(pfad, frame, "vorschau")
     if daten is None:
         daten = cache.mesh_lesen_np(pfad, frame)
@@ -323,6 +397,8 @@ def frame_laden(scene, frame=None):
     if info.get("gischt"):
         ergebnis.update(gischt_laden(scene, pfad, versatz, frame,
                                      info.get("nebel_engine", False)))
+    else:
+        ergebnis.update(_gischt_leeren())   # a bake without whitewater after one with
     from . import linse
     ergebnis["HK_Linsentropfen"] = linse.anzeigen(scene, frame)
     return ergebnis
@@ -356,13 +432,127 @@ def _render_endet(scene, depsgraph=None):
         pass
 
 
-_HANDLER = (
+def _laeufe_zuruecksetzen():
+    """No bake, lens computation or device measurement survives opening a
+    file. A file saved during the lens drops showed their progress
+    afterwards, with nothing running."""
+    from ..operators import sim_ops
+    sim_ops.LINSE_LAEUFT = False
+    sim_ops.MESSUNG["laeuft"] = False
+    sim_ops.BAKE.update(laeuft=False, abbrechen=False, sekunden=0.0)
+    for sc in bpy.data.scenes:
+        p = getattr(sc, "hydrokit", None)
+        if p is None:
+            continue
+        for name, ruhe in (("linse_rechnet", False), ("linse_fortschritt", 0.0)):
+            if getattr(p, name) != ruhe:        # untouched files stay untouched
+                setattr(p, name, ruhe)
+
+
+def nach_laden_anzeigen(scene):
+    """After opening a file the viewport water follows the timeline again if
+    the domain has a bake; before, it stood still until Refresh Display while
+    F12 rendered the right frame. A frame is loaded only if the cache is
+    newer than the file (baked again after the last save); otherwise the
+    saved meshes show the saved frame, and loading one would mark every
+    opened file as modified. True if switched on."""
+    import os
+    domain = geometrie.finde_domain(scene)
+    if domain is None:
+        return False
+    pfad = cache.pfad_aufloesen(domain.hydrokit.cache_pfad)
+    if not pfad or cache.info_lesen(pfad) is None:
+        return False
+    handler_an()
+    try:
+        neuer = bool(bpy.data.filepath) and (os.path.getmtime(os.path.join(pfad, cache.INFO))
+                                             > os.path.getmtime(bpy.data.filepath))
+    except OSError:
+        neuer = False
+    if neuer:
+        frame_laden(scene)
+    return True
+
+
+@bpy.app.handlers.persistent
+def _nach_laden(dummy=None, depsgraph=None):
+    try:
+        _laeufe_zuruecksetzen()
+        # Files saved with a click-through water: clickable again for Apply Water
+        alle_waehlbar_machen(bpy.context.scene)
+        if not bpy.app.background:
+            nach_laden_anzeigen(bpy.context.scene)
+    except Exception as e:
+        print(f"HyprW: after loading ({e})")
+    # A file saved before a change of the look keeps its old materials until
+    # Apply Look — once that was foam with subsurface, black on the GPU.
+    # Rebuild them right after opening (aussehen.MATERIAL_STAND).
+    try:
+        from . import aussehen
+        if geometrie.finde_domain(bpy.context.scene) is None or not aussehen.materialien_veraltet():
+            return
+        # Right after loading the bounding boxes are not evaluated yet; the
+        # whitewater sizes are taken from the domain's size
+        bpy.context.view_layer.update()
+        # The water only if it is an older HyprW water: a material of the
+        # user's own was replaced on every open
+        erledigt = aussehen.anwenden(bpy.context, wasser=aussehen.wasser_veraltet())
+        print(f"HyprW: materials from an older version rebuilt: {erledigt}")
+    except Exception as e:
+        print(f"HyprW: could not rebuild older materials ({e}); press Apply Look")
+
+
+# Every render takes its frame's render mesh from the cache. Installed with
+# the add-on: F12 after reopening a file, command-line renders and renders
+# while the lens drops compute (they switch the display off) used to get
+# whatever the viewport showed — the lighter viewport mesh.
+_RENDER_HANDLER = (
     ("render_init",       _render_beginnt),
-    ("frame_change_post", _bei_frame),
     ("render_pre",        _bei_frame),
     ("render_complete",   _render_endet),
     ("render_cancel",     _render_endet),
 )
+# The viewport follows the frame once something was baked or displayed
+_HANDLER = (
+    ("frame_change_post", _bei_frame),
+)
+
+
+def _entfernen(paare):
+    for liste, fn in paare:
+        L = getattr(bpy.app.handlers, liste)
+        for h in list(L):
+            if getattr(h, "__name__", "") == fn.__name__:
+                L.remove(h)
+
+
+def lade_handler_an():
+    """Always on while the add-on is enabled: the look check after loading
+    and the render handlers, unlike the display handler below, which only
+    runs once something was baked or displayed."""
+    lade_handler_aus()
+    bpy.app.handlers.load_post.append(_nach_laden)
+    for liste, fn in _RENDER_HANDLER:
+        getattr(bpy.app.handlers, liste).append(fn)
+    if not bpy.app.background:
+        # register() runs without a scene in the context
+        bpy.app.timers.register(_nach_aktivieren, first_interval=0.1)
+
+
+def lade_handler_aus():
+    # The display handler too: after a reload or an update of the add-on the
+    # old module's _bei_frame stayed and scrubbing ran the old code
+    _entfernen((("load_post", _nach_laden),) + _RENDER_HANDLER + _HANDLER)
+
+
+def _nach_aktivieren():
+    """After enabling or a reload: follow the timeline again if baked."""
+    try:
+        if "hydrokit" in bpy.types.Scene.bl_rna.properties:   # still enabled
+            nach_laden_anzeigen(bpy.context.scene)
+    except Exception:
+        pass
+    return None
 
 
 def handler_an():
@@ -372,12 +562,7 @@ def handler_an():
 
 
 def handler_aus():
-    namen = {fn.__name__ for _, fn in _HANDLER}
-    for liste, _ in _HANDLER:
-        L = getattr(bpy.app.handlers, liste)
-        for h in list(L):
-            if getattr(h, "__name__", "") in namen:
-                L.remove(h)
+    _entfernen(_HANDLER)
 
 
 def handler_laeuft():

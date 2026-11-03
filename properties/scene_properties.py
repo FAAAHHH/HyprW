@@ -21,27 +21,38 @@ def _domains_sichtbar(self, context):
                 a.tag_redraw()
 
 
-def _wasser_neu(self, context):
-    """Water sliders act at once — no new bake needed."""
-    from ..sim import aussehen
-    try:
-        aussehen.anwenden(context)
-    except Exception:
-        pass
-
-
 def _wasser_variante(self, context):
-    """A variant fills the two measured sliders, which then apply it."""
+    """A variant fills the two measured sliders. The water itself changes
+    only with Apply Water (or Apply Look), never foam, bubbles, spray, mist."""
     from ..operators.materials_ops import WASSER_VARIANTEN
     _, sicht, geloest = WASSER_VARIANTEN[self.wasser_variante]
-    self["wasser_sichtweite"] = sicht        # without update: apply once below
-    self["wasser_geloest"] = geloest
-    _wasser_neu(self, context)
+    self.wasser_sichtweite = sicht
+    self.wasser_geloest = geloest
 
 
 def _ergebnisse_waehlbar(self, context):
     from ..sim import anzeige
     anzeige.alle_waehlbar_machen(context.scene)
+
+
+def _groesse_neu(self, context):
+    """Overall Size resizes HyprW's whitewater at once (no new bake); the
+    water body stays as it is."""
+    from ..sim import aussehen
+    try:
+        aussehen.anwenden(context, wasser=False)
+    except Exception:
+        pass
+
+
+def _gitter_neu_zeichnen(self, context):
+    """The grid is drawn by a viewport handler (ui/gitter.py). An update
+    callback must return None — a lambda returning the list of tag_redraw()
+    results made Blender print a ValueError on every click."""
+    for w in context.window_manager.windows:
+        for a in w.screen.areas:
+            if a.type == 'VIEW_3D':
+                a.tag_redraw()
 
 
 class HydroKitSceneProperties(bpy.types.PropertyGroup):
@@ -53,23 +64,8 @@ class HydroKitSceneProperties(bpy.types.PropertyGroup):
             "1.0 equals the size computed from the voxel size"
         ),
         default=1.0, min=0.05, max=10.0, soft_max=3.0,
+        update=_groesse_neu,
     )
-
-    # Relative size per particle type. Foam clumps at the surface and looks
-    # larger, spray are single flying drops, dust is fine mist.
-    scale_foam: bpy.props.FloatProperty(
-        name="Foam", description="Size relative to the voxel size",
-        default=0.24, min=0.0, max=3.0)
-    scale_bubble: bpy.props.FloatProperty(
-        name="Bubbles", description="Size relative to the voxel size",
-        default=0.20, min=0.0, max=3.0)
-    scale_spray: bpy.props.FloatProperty(
-        name="Spray", description="Size relative to the voxel size",
-        default=0.14, min=0.0, max=3.0)
-    scale_dust: bpy.props.FloatProperty(
-        name="Dust", description="Size relative to the voxel size",
-        default=0.10, min=0.0, max=3.0)
-
 
     wasser_variante: bpy.props.EnumProperty(
         name="Water",
@@ -93,7 +89,6 @@ class HydroKitSceneProperties(bpy.types.PropertyGroup):
                      "2003, within 10 %). Rivers at low flow: 0.25 to 10.75 m "
                      "(Davies-Colley & Close 1990)"),
         default=3.0, min=0.05, max=80.0, soft_min=0.2, soft_max=20.0,
-        update=_wasser_neu,
     )
     wasser_geloest: bpy.props.FloatProperty(
         name="Dissolved Matter",
@@ -101,7 +96,6 @@ class HydroKitSceneProperties(bpy.types.PropertyGroup):
                      "green tint in deep water. Mountain waters 0.063 to 0.35 (EGU 2020); "
                      "bog and forest streams much more"),
         default=0.15, min=0.0, max=10.0, soft_max=2.0, precision=3,
-        update=_wasser_neu,
     )
 
     show_material: bpy.props.BoolProperty(name="Material", default=True)
@@ -113,86 +107,51 @@ class HydroKitSceneProperties(bpy.types.PropertyGroup):
         default=1.0, min=0.0, max=20.0, soft_max=10.0,
     )
 
-    beide_ufer: bpy.props.BoolProperty(
-        name="Open Both Sides",
-        description=("Also open the side against the flow direction. "
-                     "Useful for a stream flowing through, not for a pool"),
-        default=False,
-    )
-
-    nebel_dichte: bpy.props.FloatProperty(
-        name="Mist Density",
-        description="How dense the mist gets. Too high looks like cotton wool",
-        default=2.0, min=0.0, max=20.0, soft_max=6.0,
-    )
-    nebel_radius: bpy.props.FloatProperty(
-        name="Radius per Particle",
-        description=("How far a single spray particle spreads into mist. "
-                     "Larger joins the particles into a cloud"),
-        default=0.08, min=0.001, max=2.0, soft_max=0.5, unit='LENGTH',
-    )
-    nebel_hoehe_an: bpy.props.BoolProperty(
-        name="Only above a Height",
-        description=("Only create mist above this height — useful at a waterfall "
-                     "so none lies over calm water"),
-        default=False,
-    )
-    nebel_hoehe: bpy.props.FloatProperty(
-        name="From Height", default=0.0, unit='LENGTH',
-    )
-
-    tropfen_radius: bpy.props.FloatProperty(
-        name="Splash Radius",
-        description=("How close a spray particle must get to the camera to "
-                     "count as a hit"),
-        default=1.5, min=0.05, max=50.0, soft_max=5.0, unit='LENGTH',
-    )
-    tropfen_staerke: bpy.props.FloatProperty(
-        name="Strength",
-        description="How wet the lens gets in the densest spray",
-        default=0.8, min=0.0, max=1.0,
-    )
-    tropfen_traegheit: bpy.props.FloatProperty(
-        name="Drying",
-        description=("How slowly the drops disappear. 0.9 means: per "
-                     "frame 90 percent remain. Higher = slower"),
-        default=0.92, min=0.0, max=0.999,
-    )
-    tropfen_abstand: bpy.props.FloatProperty(
-        name="Distance to Lens",
-        description="How far in front of the camera the pane sits",
-        default=0.12, min=0.01, max=2.0, unit='LENGTH',
-    )
-
-    preset: bpy.props.EnumProperty(
-        name="Water Type",
-        description="Bundled settings for one kind of water body",
-        items=[
-            ('GEBIRGSBACH', "Mountain Stream", "Shallow, fast, lots of whitewater"),
-            ('WASSERFALL',  "Waterfall",   "Drop from height, whitewater and mist"),
-            ('OZEANWELLE',  "Ocean Wave",  "Large sluggish mass, foam"),
-            ('GLAS',        "Tipping a Glass", "Small scale"),
-        ],
-        default='GEBIRGSBACH',
-    )
-
-    qualitaet: bpy.props.EnumProperty(
-        name="Level",
-        description="Compute cost against quality",
-        items=[
-            ('VORSCHAU', "Preview",     "Fast, only for checking the motion"),
-            ('ARBEIT',   "Working",     "Balance for tuning"),
-            ('FINAL',    "Final",       "Full quality"),
-        ],
-        default='ARBEIT',
-    )
-
     wasser_kraeuselung: bpy.props.FloatProperty(
         name="Ripples",
         description=("Fine roughness of the water surface. At 0 it is a "
                      "perfect mirror and looks like liquid metal"),
         default=0.035, min=0.0, max=0.5, soft_max=0.12,
-        update=_wasser_neu,
+    )
+
+    # --- Studio look (materials_ops.baue_wasser): the principle of studio
+    # water materials with water's measured values
+    wasser_schatten: bpy.props.FloatProperty(
+        name="Light Through Surface",
+        description=("Share of the sunlight that reaches the ground through the water. "
+                     "Cycles can hardly find the light paths refracted by a wavy surface "
+                     "(caustics), so the ground under water stays dark and noisy. At 1 "
+                     "shadow rays pass the surface, less its Fresnel reflection; the water "
+                     "body still absorbs and scatters them as measured. Render approximation"),
+        default=1.0, min=0.0, max=1.0, subtype='FACTOR',
+    )
+    wasser_kaustik: bpy.props.FloatProperty(
+        name="Caustics",
+        description=("Bright network on the ground where waves focus the light. "
+                     "APPROXIMATION: a pattern, not traced light; the mean brightness "
+                     "stays the same"),
+        default=0.5, min=0.0, max=1.0, subtype='FACTOR',
+    )
+    wasser_kaustik_groesse: bpy.props.FloatProperty(
+        name="Caustic Size",
+        description=("Cell size of the caustic network, set by the waves that focus the "
+                     "light. APPROXIMATION: 15 cm suits short gravity waves"),
+        default=0.15, min=0.01, max=2.0, unit='LENGTH',
+    )
+    wasser_wellen: bpy.props.FloatProperty(
+        name="Capillary Ripples",
+        description=("Height of the fine ripples below the simulation resolution, at the "
+                     "1.71 cm wavelength where capillary and gravity waves meet (surface "
+                     "tension 72.75 mN/m at 20 °C, Vargaftik et al. 1983). 1 = 0.5 mm "
+                     "(APPROXIMATION)"),
+        default=1.0, min=0.0, max=4.0,
+    )
+    wasser_dispersion: bpy.props.BoolProperty(
+        name="Dispersion",
+        description=("Splits light into colours like a prism, with water's refractive "
+                     "index per colour (Daimon & Masumura 2007, 20 °C: red 1.3319, green "
+                     "1.3347, blue 1.3387). Barely visible in water, renders slower"),
+        default=False,
     )
 
     # No longer used (the water is measured now, see materials_ops); kept so
@@ -212,9 +171,10 @@ class HydroKitSceneProperties(bpy.types.PropertyGroup):
     )
     ergebnisse_waehlbar: bpy.props.BoolProperty(
         name="Selectable Results",
-        description=("Water, foam, spray, mist and lens drops can be clicked in the "
-                     "viewport. Off (default): clicks go through them to the objects "
-                     "inside the domain — the mist volume covers the whole scene"),
+        description=("Foam, spray, mist and lens drops can be clicked in the viewport. "
+                     "Off (default): clicks go through them to the objects inside the "
+                     "domain — the mist volume covers the whole scene. The water can "
+                     "always be clicked, for Apply Water"),
         default=False,
         update=_ergebnisse_waehlbar,
     )
@@ -224,8 +184,7 @@ class HydroKitSceneProperties(bpy.types.PropertyGroup):
                      "that is how finely the water (and the mist) is resolved. Does "
                      "not appear in the render"),
         default=False,
-        update=lambda self, context: [a.tag_redraw() for w in context.window_manager.windows
-                                      for a in w.screen.areas if a.type == 'VIEW_3D'],
+        update=_gitter_neu_zeichnen,
     )
 
     gitter_seiten: bpy.props.EnumProperty(
@@ -237,18 +196,14 @@ class HydroKitSceneProperties(bpy.types.PropertyGroup):
             ('ALLE',   "All Walls",     "All six sides"),
         ],
         default='VORNE',
-        update=lambda self, context: [a.tag_redraw() for w in context.window_manager.windows
-                                      for a in w.screen.areas if a.type == 'VIEW_3D'],
+        update=_gitter_neu_zeichnen,
     )
 
-    backt: bpy.props.BoolProperty(default=False)
+    # The running bake is module state (operators/sim_ops.py, BAKE): an undo
+    # step brought back an older value of a scene property
     linse_rechnet: bpy.props.BoolProperty(default=False)
     linse_fortschritt: bpy.props.FloatProperty(
         name="Progress", default=0.0, min=0.0, max=1.0, subtype='FACTOR')
-    bake_fortschritt: bpy.props.FloatProperty(
-        name="Progress", default=0.0, min=0.0, max=1.0, subtype='FACTOR')
-
-    doctor_lief: bpy.props.BoolProperty(default=False)
 
     show_whitewater: bpy.props.BoolProperty(name="Whitewater", default=True)
     show_info: bpy.props.BoolProperty(name="Scene", default=True)

@@ -7,15 +7,25 @@ mist, wind, drops on the camera lens, materials. Wherever it can, it uses
 measured physics with a source instead of values tuned by eye; where it
 has to approximate, the code says so.
 
-The FLIP Fluids add-on is **not** needed. If it is installed, HyprW also
-offers its tools for FLIP Fluids domains.
+The FLIP Fluids add-on is **not** needed.
 
 ## What it does
 
 **Own simulation** — mark objects with a role (Domain, Water, Obstacle,
 Inflow, Outflow, Mist Domain, Spray Domain) in the *HyprW — Own Engine*
 panel, press Bake. Each role has its own settings; results are drawn as
-light previews and loaded per frame from the cache.
+light previews and loaded per frame from the cache. While baking the panel
+shows the frame, a progress bar and the time left; **Lighter Viewport**
+draws a lighter mesh in the viewport while renders keep the full one.
+
+**Adaptive particles** — deep below the surface pairs of particles merge
+into larger ones; near the air, near obstacles and in fast flow they split
+back, so the surface stays as fine as the domain resolution (Adams, Pauly,
+Keiser & Guibas 2007). A large lake behind a fine waterfall no longer costs
+as many particles as the waterfall. Test scene, 30 frames on the GPU:
+2.76 million particles carried by 1.39 million, 75 s → 64 s, same volume;
+at a higher resolution 11.8 million carried by 4.5 million. Off by default,
+and then bit-identical to before.
 
 **GPU** — surface mesh, whitewater, water particles, advection and pressure
 can each run on the CPU or an NVIDIA GPU (RTX 20xx or newer). Mesh,
@@ -33,6 +43,11 @@ on CPU and GPU. Checked against Cycles path-tracing the same medium.
 matter and the murkiness of real rivers, set as **visibility** — how far a
 black object can be seen under water (4.8 / attenuation, Davies-Colley
 1988). Thin water stays clear, deep water takes its colour by itself.
+Light reaches the ground under water through the surface, with caustics,
+capillary ripples at 1.71 cm (where capillary and gravity waves meet) and
+optional dispersion with water's measured refractive index per colour
+(Daimon & Masumura 2007). Files from older versions get the current look
+when opened.
 
 **Mist** — spray breaks up into mist after literature values (air break-up,
 impact splashing), drifts with wind and is rendered as a volume.
@@ -46,10 +61,6 @@ contact angles of real glass coatings.
 
 **Grid overlay** — the simulation grid on the domain walls in the viewport,
 so you see whether an obstacle is thick enough for the resolution.
-
-**For FLIP Fluids domains** (only with the FLIP Fluids add-on): scene
-doctor (memory, obstacle thickness, scale, CFL, cache path), water presets,
-whitewater size from the voxel size, open banks, wind, mist and materials.
 
 ## Installation
 
@@ -73,14 +84,13 @@ GPU support needs an NVIDIA driver; without one everything runs on the CPU.
     ui/                     sidebar panels, grid overlay, faster scrolling
     ffengine/               the FLIP Fluids engine (MIT) and its Python API
     engine_patch/           HyprW's engine extensions, with documentation
-    utils/flip_bridge.py    the only place that knows the FLIP Fluids add-on
     tests/                  background test, see below
 
 ## Tests
 
     blender -b --factory-startup --python tests/blender_kameratropfen.py -- <path to this folder>
 
-122 checks: bake, roles, GPU against CPU, materials, lens drops, register
+174 checks: bake, roles, adaptive particles, GPU against CPU, materials, lens drops, register
 and unregister.
 
 ## License

@@ -101,6 +101,7 @@ def winkel(p):
         return math.radians(vor), math.radians(min(p.linse_winkel_rueck, vor - 0.1))
     return tuple(math.radians(w) for w in GLAESER[p.linse_glas])
 ORDNER = "linse"
+FERTIG = "fertig"       # written at the end of a complete computation
 OBJEKT = "HK_Linsentropfen"
 HOECHSTZAHL = 6000   # drops on the glass; more gets too expensive to draw
 
@@ -232,15 +233,19 @@ def berechnen(scene, melden=None):
 
 
 def ist_aktuell(scene):
-    """True if lens drops exist and are newer than the bake."""
+    """True if a complete lens computation exists and is newer than the bake.
+    The mark, not the first frame's file: after a cancelled run the first
+    frames existed and 'Compute needed' never showed."""
     domain = geometrie.finde_domain(scene)
     if domain is None:
         return False
     pfad = cache.pfad_aufloesen(domain.hydrokit.cache_pfad)
+    if not pfad:
+        return False
     info = os.path.join(pfad, "info.json")
-    erste = os.path.join(pfad, ORDNER, f"{scene.frame_start:06d}.npy")
-    return (os.path.exists(info) and os.path.exists(erste)
-            and os.path.getmtime(erste) >= os.path.getmtime(info))
+    marke = os.path.join(pfad, ORDNER, FERTIG)
+    return (os.path.exists(info) and os.path.exists(marke)
+            and os.path.getmtime(marke) >= os.path.getmtime(info))
 
 
 def berechnen_schritte(scene):
@@ -267,7 +272,7 @@ def berechnen_schritte(scene):
     ziel = os.path.join(pfad, ORDNER)
     os.makedirs(ziel, exist_ok=True)
     for name in os.listdir(ziel):
-        if name.endswith(".npy"):
+        if name.endswith(".npy") or name == FERTIG:
             os.remove(os.path.join(ziel, name))
 
     versatz = np.asarray(info.get("versatz", [0, 0, 0]), np.float64)
@@ -569,6 +574,8 @@ def berechnen_schritte(scene):
             np.save(os.path.join(ziel, f"{f:06d}_nebel.npy"),
                     np.c_[nx_n, ny_n, rn, hn].astype(np.float32))
             yield f, len(tv), len(frames)
+        # only a complete run counts as current (ist_aktuell)
+        open(os.path.join(ziel, FERTIG), "w").close()
     finally:
         scene.frame_set(alt_frame)
         anzeige.handler_an()
@@ -929,9 +936,9 @@ def anzeigen(scene, frame):
         if obj is not None:
             obj.data.clear_geometry(); obj.data.update()
         return 0
-    pfad = os.path.join(cache.pfad_aufloesen(domain.hydrokit.cache_pfad), ORDNER,
-                        f"{frame:06d}.npy")
-    daten = np.load(pfad) if os.path.exists(pfad) else np.zeros((0, 4), np.float32)
+    basis = cache.pfad_aufloesen(domain.hydrokit.cache_pfad)
+    pfad = os.path.join(basis, ORDNER, f"{frame:06d}.npy") if basis else ""
+    daten = np.load(pfad) if pfad and os.path.exists(pfad) else np.zeros((0, 4), np.float32)
     if obj is None:
         obj = bpy.data.objects.new(OBJEKT, bpy.data.meshes.new(OBJEKT))
         scene.collection.objects.link(obj)

@@ -588,7 +588,7 @@ class FluidSimulation(object):
 
     @property
     def enable_gpu_surface_meshing(self):
-        """HyprW: surface mesher scalar field on the GPU (see gpu.py)."""
+        """HydroKit: surface mesher scalar field on the GPU (see gpu.py)."""
         libfunc = lib.FluidSimulation_is_gpu_surface_meshing_enabled
         pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
         return bool(pb.execute_lib_func(libfunc, [self()]))
@@ -604,7 +604,7 @@ class FluidSimulation(object):
 
     @property
     def enable_gpu_whitewater(self):
-        """HyprW: whitewater step on the GPU — the surface curvature (gpu.py)."""
+        """HydroKit: whitewater step on the GPU — the surface curvature (gpu.py)."""
         libfunc = lib.FluidSimulation_is_gpu_whitewater_enabled
         pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
         return bool(pb.execute_lib_func(libfunc, [self()]))
@@ -620,7 +620,7 @@ class FluidSimulation(object):
 
     @property
     def enable_gpu_water_particles(self):
-        """HyprW: water particle step on the GPU — the liquid level set (gpu.py)."""
+        """HydroKit: water particle step on the GPU — the liquid level set (gpu.py)."""
         libfunc = lib.FluidSimulation_is_gpu_water_particles_enabled
         pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
         return bool(pb.execute_lib_func(libfunc, [self()]))
@@ -636,7 +636,7 @@ class FluidSimulation(object):
 
     @property
     def enable_gpu_advection(self):
-        """HyprW: advection on the GPU — the FLIP velocity transfer (gpu.py)."""
+        """HydroKit: advection on the GPU — the FLIP velocity transfer (gpu.py)."""
         libfunc = lib.FluidSimulation_is_gpu_advection_enabled
         pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
         return bool(pb.execute_lib_func(libfunc, [self()]))
@@ -652,7 +652,7 @@ class FluidSimulation(object):
 
     @property
     def enable_gpu_pressure(self):
-        """HyprW: pressure solve on the GPU (gpu.py)."""
+        """HydroKit: pressure solve on the GPU (gpu.py)."""
         libfunc = lib.FluidSimulation_is_gpu_pressure_enabled
         pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
         return bool(pb.execute_lib_func(libfunc, [self()]))
@@ -2281,32 +2281,129 @@ class FluidSimulation(object):
         pb.init_lib_func(libfunc, [c_void_p, c_int, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), int(n)])
 
+    def set_random_seed(self, seed):
+        """HydroKit: fixed seed for bit-identical bakes (regression tests)."""
+        libfunc = lib.FluidSimulation_set_random_seed
+        pb.init_lib_func(libfunc, [c_void_p, c_int, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), int(seed)])
+
+    # HydroKit: adaptive particle sizes (FluidSimulation::enableAdaptiveParticles)
+
+    @property
+    def enable_adaptive_particles(self):
+        libfunc = lib.FluidSimulation_is_adaptive_particles_enabled
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
+        return bool(pb.execute_lib_func(libfunc, [self()]))
+
+    @enable_adaptive_particles.setter
+    def enable_adaptive_particles(self, boolval):
+        if boolval:
+            libfunc = lib.FluidSimulation_enable_adaptive_particles
+        else:
+            libfunc = lib.FluidSimulation_disable_adaptive_particles
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self()])
+
+    @property
+    def adaptive_particle_max_level(self):
+        libfunc = lib.FluidSimulation_get_adaptive_particle_max_level
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
+        return pb.execute_lib_func(libfunc, [self()])
+
+    @adaptive_particle_max_level.setter
+    @decorators.check_ge_zero
+    @decorators.check_le(6)
+    def adaptive_particle_max_level(self, level):
+        libfunc = lib.FluidSimulation_set_adaptive_particle_max_level
+        pb.init_lib_func(libfunc, [c_void_p, c_int, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), int(level)])
+
+    @property
+    def adaptive_particle_split_time(self):
+        libfunc = lib.FluidSimulation_get_adaptive_particle_split_time
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_double)
+        return pb.execute_lib_func(libfunc, [self()])
+
+    @adaptive_particle_split_time.setter
+    @decorators.check_gt_zero
+    def adaptive_particle_split_time(self, seconds):
+        libfunc = lib.FluidSimulation_set_adaptive_particle_split_time
+        pb.init_lib_func(libfunc, [c_void_p, c_double, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), seconds])
+
+    @property
+    def adaptive_particle_split_factor(self):
+        libfunc = lib.FluidSimulation_get_adaptive_particle_split_factor
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_double)
+        return pb.execute_lib_func(libfunc, [self()])
+
+    @adaptive_particle_split_factor.setter
+    @decorators.check_gt_zero
+    def adaptive_particle_split_factor(self, alpha):
+        libfunc = lib.FluidSimulation_set_adaptive_particle_split_factor
+        pb.init_lib_func(libfunc, [c_void_p, c_double, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), alpha])
+
+    @property
+    def adaptive_particle_merge_factor(self):
+        libfunc = lib.FluidSimulation_get_adaptive_particle_merge_factor
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_double)
+        return pb.execute_lib_func(libfunc, [self()])
+
+    @adaptive_particle_merge_factor.setter
+    @decorators.check_gt_zero
+    def adaptive_particle_merge_factor(self, beta):
+        libfunc = lib.FluidSimulation_set_adaptive_particle_merge_factor
+        pb.init_lib_func(libfunc, [c_void_p, c_double, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), beta])
+
+    @property
+    def adaptive_particle_solid_distance(self):
+        libfunc = lib.FluidSimulation_get_adaptive_particle_solid_distance
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
+        return pb.execute_lib_func(libfunc, [self()])
+
+    @adaptive_particle_solid_distance.setter
+    @decorators.check_ge_zero
+    def adaptive_particle_solid_distance(self, cells):
+        libfunc = lib.FluidSimulation_set_adaptive_particle_solid_distance
+        pb.init_lib_func(libfunc, [c_void_p, c_int, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), int(cells)])
+
+    def get_adaptive_particle_level_counts(self):
+        """Marker particles per level 0..6; level L holds 2^L standard volumes."""
+        counts = (c_int * 7)()
+        libfunc = lib.FluidSimulation_get_adaptive_particle_level_counts
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), counts])
+        return [int(c) for c in counts]
+
     def set_surface_wind_velocity(self, wx, wy, wz):
-        """HyprW: wind on the water surface (m/s)."""
+        """HydroKit: wind on the water surface (m/s)."""
         libfunc = lib.FluidSimulation_set_surface_wind_velocity
         pb.init_lib_func(libfunc, [c_void_p, c_double, c_double, c_double, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), wx, wy, wz])
 
     def set_surface_wind_factor(self, f):
-        """HyprW: how strongly the wind grabs the surface. 0 = not at all."""
+        """HydroKit: how strongly the wind grabs the surface. 0 = not at all."""
         libfunc = lib.FluidSimulation_set_surface_wind_factor
         pb.init_lib_func(libfunc, [c_void_p, c_double, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), f])
 
     def set_surface_wind_depth(self, cells):
-        """HyprW: how deep below the surface the wind still acts (cells)."""
+        """HydroKit: how deep below the surface the wind still acts (cells)."""
         libfunc = lib.FluidSimulation_set_surface_wind_depth
         pb.init_lib_func(libfunc, [c_void_p, c_double, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), cells])
 
     def set_dust_turbulence_factors(self, tmin, tmax):
-        """HyprW: threshold factors of mist emission (default 0.75 / 1.0)."""
+        """HydroKit: threshold factors of mist emission (default 0.75 / 1.0)."""
         libfunc = lib.FluidSimulation_set_dust_turbulence_factors
         pb.init_lib_func(libfunc, [c_void_p, c_double, c_double, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), tmin, tmax])
 
     def set_max_dust_emitter_to_obstacle_distance(self, d):
-        """HyprW: range of mist emission in grid cells (default 2.5)."""
+        """HydroKit: range of mist emission in grid cells (default 2.5)."""
         libfunc = lib.FluidSimulation_set_max_dust_emitter_to_obstacle_distance
         pb.init_lib_func(libfunc, [c_void_p, c_double, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), d])
@@ -2318,31 +2415,31 @@ class FluidSimulation(object):
 
     @decorators.xyz_or_vector
     def set_diffuse_dust_outer_bounds(self, bounds):
-        """HyprW: mist domain (AABB in engine coordinates)."""
+        """HydroKit: mist domain (AABB in engine coordinates)."""
         libfunc = lib.FluidSimulation_set_diffuse_dust_outer_bounds
         pb.init_lib_func(libfunc, [c_void_p, AABB_t, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), bounds.to_struct()])
 
     def set_diffuse_spray_droplet_model(self, d50, dmin, dmax):
-        """HyprW: spray droplet physics (metres). d50 <= 0 switches it off."""
+        """HydroKit: spray droplet physics (metres). d50 <= 0 switches it off."""
         libfunc = lib.FluidSimulation_set_diffuse_spray_droplet_model
         pb.init_lib_func(libfunc, [c_void_p, c_double, c_double, c_double, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), d50, dmin, dmax])
 
     def set_diffuse_dust_droplet_model(self, d50, dmin, dmax):
-        """HyprW: mist droplet physics (metres). d50 <= 0 switches it off."""
+        """HydroKit: mist droplet physics (metres). d50 <= 0 switches it off."""
         libfunc = lib.FluidSimulation_set_diffuse_dust_droplet_model
         pb.init_lib_func(libfunc, [c_void_p, c_double, c_double, c_double, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), d50, dmin, dmax])
 
     def set_diffuse_spray_outer_bounds(self, bounds):
-        """HyprW: spray domain (AABB in engine coordinates)."""
+        """HydroKit: spray domain (AABB in engine coordinates)."""
         libfunc = lib.FluidSimulation_set_diffuse_spray_outer_bounds
         pb.init_lib_func(libfunc, [c_void_p, AABB_t, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), bounds.to_struct()])
 
     def set_diffuse_spray_mist_model(self, diameter, splash_fraction, splash_k):
-        """HyprW: mist from spray after Weber breakup and impact splashing.
+        """HydroKit: mist from spray after Weber breakup and impact splashing.
 
         diameter in metres (<= 0 switches it off), splash_fraction = largest
         fine fraction when splashing, splash_k = splash threshold K (Cossali: 2100).
@@ -2355,7 +2452,7 @@ class FluidSimulation(object):
         pb.execute_lib_func(libfunc, [self(), diameter, splash_fraction, splash_k])
 
     def set_diffuse_wind_velocity(self, wx, wy, wz):
-        """HyprW: wind velocity for whitewater in the air."""
+        """HydroKit: wind velocity for whitewater in the air."""
         libfunc = lib.FluidSimulation_set_diffuse_wind_velocity
         pb.init_lib_func(
             libfunc,
