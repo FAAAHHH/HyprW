@@ -113,11 +113,13 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
     bl_idname = "hydrokit.sim_bake"
     bl_label = "Bake"
     bl_description = ("Runs the simulation with HyprW's own engine. "
-                      "Works step by step, Blender stays usable")
+                      "Computes in the background, Blender stays usable")
+
+    weiter: bpy.props.BoolProperty(name="Resume", options={'HIDDEN', 'SKIP_SAVE'})
 
     _timer = None
     _backer = None
-    _szene = None           # the baked scene, also when the window shows another
+    _lauf = None            # backen.Hintergrund: the frames in a worker thread
     _zeiten = None          # seconds of the last frames (ZEIT_FRAMES)
     _letzter = 0.0
 
@@ -126,6 +128,11 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
         domain = geometrie.finde_domain(context.scene)
         if domain is None or BAKE["laeuft"]:
             return False
+        if LINSE_LAEUFT:
+            # They start by themselves after every bake and read the cache a
+            # new bake empties first: the drops then came from half a cache
+            cls.poll_message_set("Lens drops are being computed: wait, or cancel them with Esc")
+            return False
         if not cache.pfad_aufloesen(domain.hydrokit.cache_pfad):
             cls.poll_message_set(backen.cache_fehlt_text(domain))
             return False
@@ -133,7 +140,7 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
 
     def execute(self, context):
         # In background mode there is no timer: compute in one go
-        n, dauer, fehler = backen.backen(context.scene)
+        n, dauer, fehler = backen.backen(context.scene, weiter=self.weiter)
         if fehler:
             self.report({'ERROR'}, fehler)
             return {'CANCELLED'}
@@ -142,10 +149,10 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
 
     def invoke(self, context, event):
         self._backer = backen.Backer(context.scene)
-        if not self._backer.vorbereiten():
+        if not self._backer.vorbereiten(self.weiter):
             self.report({'ERROR'}, self._backer.fehler or "Preparation failed")
             return {'CANCELLED'}
-        self._szene = context.scene
+        self._lauf = backen.Hintergrund(self._backer)
         BAKE.update(laeuft=True, abbrechen=False, szene=context.scene.name,
                     start=self._backer.frame, sekunden=0.0)
         self._stand_merken()
@@ -153,42 +160,65 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
         self._letzter = time.time()
         self._status(context)
         wm = context.window_manager
-        self._timer = wm.event_timer_add(0.01, window=context.window)
+        # Only looks whether the worker is done: 20 times a second is plenty
+        self._timer = wm.event_timer_add(0.05, window=context.window)
         wm.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
     def _stand_merken(self):
         BAKE["frame"] = self._backer.frame
-        BAKE["ende"] = self._szene.frame_end
+        szene = self._backer.scene
+        if szene is not None:
+            BAKE["ende"] = szene.frame_end
+
+    @staticmethod
+    def _neu_zeichnen(context):
+        if context.screen is None:
+            return
+        for bereich in context.screen.areas:
+            if bereich.type == 'VIEW_3D':
+                bereich.tag_redraw()
 
     def modal(self, context, event):
         # Only the press: after Esc closed a menu or aborted a move, its
         # release reached the bake as well and cancelled it
-        if (event.type == 'ESC' and event.value == 'PRESS') or BAKE["abbrechen"]:
-            return self._beenden(context, abgebrochen=True)
+        esc = event.type == 'ESC' and event.value == 'PRESS'
+        if (esc or BAKE["abbrechen"]) and not self._lauf.abbrechen:
+            # The frame being computed cannot be stopped half-way: the bake
+            # ends when it is done, and the panel says so until then
+            self._lauf.abbrechen = True
+            BAKE["abbrechen"] = True
+            self._status(context)
+            self._neu_zeichnen(context)
         if event.type != 'TIMER':
-            return {'PASS_THROUGH'}
+            return {'RUNNING_MODAL'} if esc else {'PASS_THROUGH'}
         try:
-            weiter = self._backer.schritt()
+            zustand = self._lauf.tick()
+        except backen.EngineFehler:
+            return self._beenden(context, abgebrochen=True)    # reports it
         except Exception as e:
             self.report({'ERROR'}, f"{type(e).__name__}: {e}")
             return self._beenden(context, abgebrochen=True)
+        if zustand == self._lauf.RECHNET:
+            return {'PASS_THROUGH'}
+        if zustand == self._lauf.FERTIG:
+            return self._beenden(context, abgebrochen=self._lauf.abgebrochen)
         jetzt = time.time()
         self._zeiten.append(jetzt - self._letzter)
         self._letzter = jetzt
         BAKE["sekunden"] = sum(self._zeiten) / len(self._zeiten)
         self._stand_merken()
         self._status(context)
-        for bereich in context.screen.areas:
-            if bereich.type == 'VIEW_3D':
-                bereich.tag_redraw()
-        if not weiter:
-            return self._beenden(context)
-        return {'RUNNING_MODAL'}
+        self._neu_zeichnen(context)
+        return {'PASS_THROUGH'}
 
     def cancel(self, context):
         """Opening a file ends the bake without modal(): only this runs. The
-        GPU memory goes back, the cache keeps what was baked so far."""
+        GPU memory goes back, the cache keeps what was baked so far. The
+        engine is freed here, so the frame being computed has to end first."""
+        if self._lauf is not None:
+            self._lauf.warten()
+            self._lauf = None
         if self._timer is not None:
             context.window_manager.event_timer_remove(self._timer)
             self._timer = None
@@ -204,7 +234,10 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
     def _status(self, context):
         """The frame in Blender's status bar too, visible with the sidebar closed."""
         frame, zeit = bake_stand()
-        text = f"HyprW: {frame}" + (f", {zeit}" if zeit else "") + "  (Esc cancels)"
+        if BAKE["abbrechen"]:
+            text = f"HyprW: {frame}  (cancelling when this frame is done)"
+        else:
+            text = f"HyprW: {frame}" + (f", {zeit}" if zeit else "") + "  (Esc cancels)"
         try:
             context.workspace.status_text_set(text)
         except AttributeError:
@@ -220,21 +253,33 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
         except AttributeError:
             pass
         BAKE.update(laeuft=False, abbrechen=False, sekunden=0.0)
-        szene = self._szene
+        if getattr(self, "_lauf", None) is not None:
+            self._lauf.warten()         # an error path: nothing computes after this
+            self._lauf = None
+        szene = self._backer.scene
         n, dauer = self._backer.fertig, self._backer.dauer
+        engine_fehler = self._backer.engine_fehler
         verdickt = (self._backer.info or {}).get("verdickt", [])
         gpu_text, gpu_warnung = self._backer.gpu_bericht()
+        if abgebrochen:
+            # so Resume goes on from here; after a failed frame it keeps the
+            # last periodic state (Backer.zwischenstand_sichern)
+            self._backer.zwischenstand_sichern()
+        # A failed save only reached the console: Resume then silently starts
+        # further back than the user expects
+        zs_fehler = self._backer.zwischenstand_fehler
         # before the lens job: its drops count as current when they are
         # newer than info.json (linse.ist_aktuell)
         self._backer.abschliessen()
         self._backer.aufraeumen()
         self._backer = None
         anzeige.handler_an()
-        anzeige.frame_laden(szene)
+        if szene is not None:
+            anzeige.frame_laden(szene)
         # The lens job and the look work on the window's scene: only while
         # it still shows the baked one (else Apply Look there later)
-        gleich = context.scene == szene
-        domain = geometrie.finde_domain(szene)
+        gleich = szene is not None and context.scene == szene
+        domain = geometrie.finde_domain(szene) if szene is not None else None
         if gleich and szene.camera is not None and domain is not None and domain.hydrokit.linse_an:
             linse_im_hintergrund_starten()     # step by step, Blender stays usable
         # New whitewater gets its look at once: bare points render black
@@ -245,9 +290,16 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
                 look = aussehen.nach_bake(context)
             except Exception as e:
                 print(f"HyprW: no look after the bake ({e}); press Apply Look")
+        zs_text = f"no saved state ({zs_fehler})" if zs_fehler else ""
+        if engine_fehler:
+            # The last report is the one the status bar shows
+            self.report({'ERROR'}, f"{engine_fehler} — {anzahl(n, 'frame')} baked"
+                                   + (f" — {zs_text}" if zs_text else ""))
+            return {'CANCELLED'}
         if abgebrochen:
             self.report({'WARNING'}, f"Cancelled after {anzahl(n, 'frame')}"
-                                     + (" — look applied" if look else ""))
+                                     + (" — look applied" if look else "")
+                                     + (f" — {zs_text}" if zs_text else ""))
             return {'CANCELLED'}
         teile = [f"{anzahl(n, 'frame')} in {dauer:.1f}s"]
         if look:
@@ -256,7 +308,10 @@ class HYDROKIT_OT_sim_bake(bpy.types.Operator):
             teile.append(gpu_text)
         if verdickt:
             teile.append(f"open obstacle(s) given 3 cells of thickness: {', '.join(verdickt)}")
-        self.report({'WARNING'} if (verdickt or gpu_warnung) else {'INFO'}, " — ".join(teile))
+        if zs_text:
+            teile.append(zs_text)
+        self.report({'WARNING'} if (verdickt or gpu_warnung or zs_text) else {'INFO'},
+                    " — ".join(teile))
         return {'FINISHED'}
 
 
@@ -278,7 +333,15 @@ class HYDROKIT_OT_sim_clear(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return geometrie.finde_domain(context.scene) is not None
+        if geometrie.finde_domain(context.scene) is None:
+            return False
+        # The panel hides the button while baking, the operator search does
+        # not: the bake went on writing into the emptied cache, without its
+        # info.json and its saved state
+        if BAKE["laeuft"] or LINSE_LAEUFT:
+            cls.poll_message_set("A bake or the lens drops are running: cancel them first")
+            return False
+        return True
 
     def invoke(self, context, event):
         dom = geometrie.finde_domain(context.scene)
@@ -313,7 +376,7 @@ class HYDROKIT_OT_sim_display(bpy.types.Operator):
             self.report({'WARNING'}, "Nothing baked")
             return {'CANCELLED'}
         teile = ", ".join(f"{k.replace('HK_','')}: {v}" for k, v in erg.items())
-        self.report({'INFO'}, teile or "leer")
+        self.report({'INFO'}, teile or "empty")
         return {'FINISHED'}
 
 
@@ -389,6 +452,40 @@ class HYDROKIT_OT_sim_water(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _linse_bericht(scene, n_frames, n_tropfen):
+    """Report after a lens computation. A camera that never comes near the
+    spray gets an empty glass, and that looked like a broken button: on
+    6.11.2026 the user's camera stayed 3 to 100 m from every spray particle
+    in the rendered frames 175-298, and the first drops came at frame 325.
+    Then say where drops are and what to change."""
+    import os
+    import numpy as np
+    from ..sim import cache, linse
+    domain = geometrie.finde_domain(scene)
+    pfad = cache.pfad_aufloesen(domain.hydrokit.cache_pfad) if domain else ""
+    ordner = os.path.join(pfad, linse.ORDNER) if pfad else ""
+
+    def nass(f):
+        for name in (f"{f:06d}.npy", f"{f:06d}_nebel.npy"):
+            try:
+                if len(np.load(os.path.join(ordner, name), mmap_mode='r')):
+                    return True
+            except (OSError, ValueError):
+                pass        # missing, or empty (an empty array cannot be mapped)
+        return False
+
+    a, b = scene.frame_start, scene.frame_end
+    frames = cache.gebackene_frames(pfad) if pfad else []
+    if any(nass(f) for f in frames if a <= f <= b):
+        return {'INFO'}, f"{n_frames} frames, {n_tropfen} drops on the lens at the end"
+    erster = next((f for f in frames if nass(f)), None)
+    rat = "Move the camera into the spray, or raise Capture Range"
+    if erster is None:
+        return {'WARNING'}, f"No spray reached the lens in any baked frame. {rat}"
+    return {'WARNING'}, (f"No drops on the lens in frames {a}-{b}: the first come at "
+                         f"frame {erster}. {rat}")
+
+
 # Runs a step-by-step lens computation right now? Module state, not a scene
 # property: a property saved as True by a crash would block it forever.
 LINSE_LAEUFT = False
@@ -404,6 +501,9 @@ class HYDROKIT_OT_linse_berechnen(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         domain = geometrie.finde_domain(context.scene)
+        if BAKE["laeuft"]:
+            cls.poll_message_set("A bake is running: the drops are computed after it")
+            return False
         return (domain is not None and domain.hydrokit.linse_an
                 and context.scene.camera is not None)
 
@@ -418,7 +518,7 @@ class HYDROKIT_OT_linse_berechnen(bpy.types.Operator):
             self.report({'WARNING'}, "Nothing baked or no camera")
             return {'CANCELLED'}
         anzeige.frame_laden(context.scene)
-        self.report({'INFO'}, f"{n_frames} frames, {n_tropfen} drops on the lens at the end")
+        self.report(*_linse_bericht(context.scene, n_frames, n_tropfen))
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -482,7 +582,7 @@ class HYDROKIT_OT_linse_berechnen(bpy.types.Operator):
         if not n_frames:
             self.report({'WARNING'}, "Nothing baked or no camera")
             return {'CANCELLED'}
-        self.report({'INFO'}, f"{n_frames} frames, {n_tropfen} drops on the lens at the end")
+        self.report(*_linse_bericht(context.scene, n_frames, n_tropfen))
         return {'FINISHED'}
 
 

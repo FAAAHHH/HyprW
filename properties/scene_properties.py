@@ -55,6 +55,15 @@ def _gitter_neu_zeichnen(self, context):
                 a.tag_redraw()
 
 
+def _andere_pausieren_neu(self, context):
+    """Switched while the timeline plays: pauses or sets back at once."""
+    from ..sim import szene_pause
+    try:
+        szene_pause.einstellung_geaendert(self.id_data)
+    except Exception:
+        pass
+
+
 class HydroKitSceneProperties(bpy.types.PropertyGroup):
 
     whitewater_scale_multiplier: bpy.props.FloatProperty(
@@ -178,6 +187,17 @@ class HydroKitSceneProperties(bpy.types.PropertyGroup):
         default=False,
         update=_ergebnisse_waehlbar,
     )
+    # Read by sim/abspielen.py on every frame while the timeline plays and by
+    # sim/abspielen_aussehen.py (the light mist); no update callback: paused
+    # frames always show the full result anyway
+    abspielen_leicht: bpy.props.BoolProperty(
+        name="Light Playback",
+        description=("While the timeline plays, the viewport shows lighter versions of the "
+                     "baked results: fewer foam, bubble and spray points, a lighter water "
+                     "mesh and a coarser mist. Paused frames and every render show the full "
+                     "result"),
+        default=True,
+    )
     gitter_anzeigen: bpy.props.BoolProperty(
         name="Show Grid",
         description=("Shows the simulation cells on the domains in the viewport: "
@@ -198,6 +218,21 @@ class HydroKitSceneProperties(bpy.types.PropertyGroup):
         default='VORNE',
         update=_gitter_neu_zeichnen,
     )
+
+    # Playback: heavy animation that is not HyprW's holds still while the
+    # timeline plays (sim/szene_pause.py)
+    abspielen_andere_pausieren: bpy.props.BoolProperty(
+        name="Pause Other Animation",
+        description=("While the timeline plays, heavy animation that is not HyprW's (trees "
+                     "swaying in the wind, for example) holds still in the pose of the frame "
+                     "where playback started, so the water plays smoothly. Stopped, in every "
+                     "render and in every saved file everything moves as before"),
+        default=False,
+        update=_andere_pausieren_neu,
+    )
+    # What Pause Other Animation holds still right now (JSON), so that an
+    # undo step, an autosave or a crash file can be set back; unset otherwise
+    abspielen_pause_stand: bpy.props.StringProperty(options={'HIDDEN'})
 
     # The running bake is module state (operators/sim_ops.py, BAKE): an undo
     # step brought back an older value of a scene property

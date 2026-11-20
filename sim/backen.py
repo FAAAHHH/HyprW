@@ -5,9 +5,12 @@
 # stores the result in the cache. Runs without FLIP Fluids.
 
 import os
+import threading
 import time
 
-from . import cache, geometrie, partikel, partikel
+import bpy
+
+from . import cache, geometrie, partikel, zwischenstand
 
 
 # ENGINE EXTENSIONS (engine_patch/). The LOADED library is checked, not just
@@ -27,6 +30,11 @@ ERWEITERUNGEN = (
     ("gpu_advektion", "Advection on the GPU", "FluidSimulation_enable_gpu_advection"),
     ("gpu_druck",    "Pressure on the GPU", "FluidSimulation_enable_gpu_pressure"),
     ("adaptiv",      "Adaptive particles",  "FluidSimulation_enable_adaptive_particles"),
+    # Saved states call six functions that hydrokit-engine.patch did not
+    # have (review 05.11.2026): with an older .so the first save (frame 5 by
+    # default) raised AttributeError and ended the bake, with no warning before
+    ("zwischenstand", "Saved states",      "FluidSimulation_has_marker_particle_level_data"),
+    ("aniso",        "Anisotropic surface", "FluidSimulation_enable_anisotropic_meshing"),
 )
 
 # The steps of a frame and their GPU versions (engine_patch/README.md section
@@ -132,7 +140,7 @@ def zweites_netz(props):
     return None
 
 
-def _sim_aufbauen(scene, domain, bericht=None):
+def _sim_aufbauen(scene, domain, bericht=None, stand=None):
     """FluidSimulation from the scene. Returns (sim, info, halter).
 
     halter keeps the MeshObject instances alive — if it is released,
@@ -163,7 +171,9 @@ def _sim_aufbauen(scene, domain, bericht=None):
     verdickt = []
 
     def mesh_objekt(obj, mindestdicke=0.0, umkehren=False):
-        tm = geometrie.als_trianglemesh(obj, versatz, mindestdicke=mindestdicke)
+        # An open sheet only near the grid: 4 cells plus its thickness around it
+        tm = geometrie.als_trianglemesh(obj, versatz, mindestdicke=mindestdicke,
+                                        bereich=((i * dx, j * dx, k * dx), 4.0 * dx + mindestdicke))
         if tm is None:
             return None
         if getattr(tm, "hk_verdickt", False):
@@ -197,7 +207,8 @@ def _sim_aufbauen(scene, domain, bericht=None):
                 mo.dust_emission_strength = props.nebel_staerke * h.hindernis_nebel
             sim.add_mesh_obstacle(mo)
 
-    for obj in objekte['FLUID']:
+    # Resuming: the starting water is in the saved particles already
+    for obj in (objekte['FLUID'] if stand is None else []):
         mo = mesh_objekt(obj)
         if mo is not None:
             v = obj.hydrokit.start_geschwindigkeit
@@ -289,6 +300,36 @@ def _sim_aufbauen(scene, domain, bericht=None):
                                                  props.adaptiv_teil_faktor)
         sim.adaptive_particle_solid_distance = props.adaptiv_hindernis_abstand
         sim.enable_adaptive_particles = True
+
+    # LIQUID: the engine's solvers work with density 1, so they take the
+    # values per kilogram. Viscosity after Batty & Bridson 2008 (variational,
+    # viscositysolver.cpp): the kinematic viscosity mu/rho in m²/s. Surface
+    # tension as a pressure jump sigma * curvature at the surface
+    # (pressuresolver.cpp): sigma/rho in m³/s². FLIP Fluids scales its slider
+    # by 0.1 on top; HyprW passes the measured value. Not set when off: the
+    # engine then skips both.
+    # Checked 19.11.2026 on a 5 cm water drop without gravity, stretched 15 %
+    # (Resolution 64 on a 12 cm domain, 13 cells per radius): it oscillates
+    # with a period of 1.11 s, Rayleigh (1879) gives 1.03 s for mode 2 (the
+    # large amplitude lengthens it). With 0.125 Pa·s the amplitude decays with
+    # about 1.8 s against the undamped drop, Lamb (1932) gives R²/(5 nu) =
+    # 1.0 s: the viscosity acts, about 1.8 times weaker at this resolution.
+    if props.zaehigkeit_an and props.zaehigkeit > 0.0:
+        sim.viscosity = props.zaehigkeit / props.dichte
+    if props.oberflaechenspannung_an and props.oberflaechenspannung > 0.0:
+        k = props.oberflaechenspannung / props.dichte
+        sim.surface_tension = k
+        # Surface tension is explicit: a step longer than about the time a
+        # capillary wave takes across a cell blows the liquid apart (measured:
+        # a 5 cm water drop filled its 12 cm domain within 0.3 s with the
+        # engine's default limit of 10). FLIP Fluids' default accuracy (95 %)
+        # gives 0.4875; the frame then needs this many steps, more than the
+        # engine's default maximum of 6 in small scenes.
+        sim.surface_tension_condition_number = OBERFLAECHE_KONDITION
+        frame_dt = scene.render.fps_base / scene.render.fps
+        noetig = oberflaechen_schritte(dx, k, frame_dt)
+        if noetig > sim.max_time_steps_per_frame:
+            sim.max_time_steps_per_frame = noetig
 
     sim.enable_diffuse_material_output = props.gischt
     zerstaeubung = False
@@ -422,6 +463,13 @@ def _sim_aufbauen(scene, domain, bericht=None):
     # Which second mesh the cache holds, for sim/anzeige.py
     vorschau = zweites_netz(props)
     netz = {"detail": render_stufe, "vorschau": vorschau}
+    # ANISOTROPIC SURFACE (engine_patch/README.md section 12): kernels
+    # stretched along the surface, a smoothed field and a threshold that keeps
+    # the particles' volume, instead of the union of spheres
+    if props.netz_anisotrop and kann["aniso"]:
+        sim.enable_anisotropic_meshing = True
+        sim.anisotropic_meshing_smoothness = props.netz_glaettung
+        netz["aniso"] = round(props.netz_glaettung, 3)
     if vorschau == "grob":
         laengste = max(i, j, k) * dx
         sim.enable_preview_mesh_output = laengste / props.vorschau_aufloesung
@@ -429,6 +477,8 @@ def _sim_aufbauen(scene, domain, bericht=None):
         sim.enable_preview_mesh_output = dx / props.unterteilung_viewport
         netz["viewport"] = props.unterteilung_viewport
 
+    if stand is not None:
+        zwischenstand.laden(sim, stand, gischt=props.gischt)
     sim.initialize()
 
     info = {
@@ -467,15 +517,51 @@ def cache_fehlt_text(domain):
     return "No cache folder set"
 
 
-class Backer:
-    """Bakes step by step, so Blender can breathe in between.
+# Time step limit of surface tension in units of sqrt(dx³ / (sigma/rho)):
+# FLIP Fluids' value at its default accuracy of 95 % (0.25 + 0.05 * 4.75)
+OBERFLAECHE_KONDITION = 0.4875
 
-    One run in one go would freeze the UI. So the modal operator computes
-    one frame per time step via schritt().
+
+def oberflaechen_schritte(dx, k, frame_dt):
+    """Steps per frame surface tension k = sigma/rho (m³/s²) needs at cell size dx."""
+    import math
+    grenze = OBERFLAECHE_KONDITION * math.sqrt(dx ** 3 / k)
+    return max(1, math.ceil(frame_dt / grenze))
+
+
+class EngineFehler(RuntimeError):
+    """The engine raised in the middle of a frame (FluidSimulation.update).
+    Its state is undefined after that: the bake stops, and no saved state
+    is written from it."""
+
+
+def engine_fehler_text(frame, e):
+    """Readable text for an error from FluidSimulation.update. The C++
+    exception arrives as "FluidSimulation_update - <what()>"; an exception
+    in an engine thread reaches Python the same way since 05.11.2026 (before,
+    std::terminate took Blender down)."""
+    text = " ".join(str(e).split(" - ", 1)[-1].split())
+    if text.startswith("Error: "):
+        text = text[len("Error: "):]
+    if "bad_alloc" in text or "bad_array_new_length" in text:
+        text = f"out of memory ({text})"
+    return f"Frame {frame}: the engine stopped: {text}"
+
+
+class Backer:
+    """Bakes frame by frame.
+
+    A frame has three parts, so the modal operator can leave the middle one
+    to a worker thread (Hintergrund) and Blender stays usable meanwhile:
+    schritt_beginnen (reads the scene), schritt_rechnen (the engine and the
+    cache files, no Blender data) and schritt_beenden (counts the frame).
+    schritt() runs all three in one go, for scripts and background mode.
     """
 
     def __init__(self, scene):
-        self.scene = scene
+        # Not the scene itself: an undo during the bake puts the scene at
+        # another address, and the bake now runs while the user works
+        self._szene = (scene.session_uid, scene.name)
         self.sim = None
         self.info = None
         self._halter = None
@@ -485,8 +571,25 @@ class Backer:
         self.gesamt = 0
         self.fehler = None
         self.start = None
+        self._vorher = 0.0              # seconds before a resume
+        self._erster = None             # first frame of the whole bake
+        self._gesichert = None          # frame of the newest saved state
+        self._gitter = None
+        self.engine_fehler = None       # text, once the engine raised in a frame
+        self._offen = False             # a frame is being computed or failed in between
+        self.zwischenstand_fehler = None    # why the last save failed, for the report
 
-    def vorbereiten(self):
+    @property
+    def scene(self):
+        """The baked scene, looked up anew: by its session_uid (it survives
+        undo and renaming), else by its name. None once it was deleted."""
+        uid, name = self._szene
+        for sc in bpy.data.scenes:
+            if sc.session_uid == uid:
+                return sc
+        return bpy.data.scenes.get(name)
+
+    def vorbereiten(self, weiter=False):
         domain = geometrie.finde_domain(self.scene)
         if domain is None:
             self.fehler = "No domain in the scene"
@@ -495,27 +598,83 @@ class Backer:
         if not self.pfad:
             self.fehler = cache_fehlt_text(domain)
             return False
-        self.sim, self.info, self._halter = _sim_aufbauen(self.scene, domain)
+        masse = geometrie.gitter_masse(domain, domain.hydrokit.aufloesung)
+        if masse and geometrie.gitter_zu_gross(masse):
+            self.fehler = ("Resolution too high for this domain: the engine can "
+                           "handle about 2.1 billion cells")
+            return False
+        versatz = geometrie.domain_bereich(domain)[0]
+        stand = None
+        if weiter:
+            if not engine_erweiterungen().get("zwischenstand"):
+                self.fehler = ("This engine cannot resume"
+                               + (": restart Blender" if neustart_noetig() else ""))
+                return False
+            stand = zwischenstand.lesen(self.pfad)
+            self.fehler = zwischenstand.warum_nicht(stand, masse, versatz, self.scene.frame_start,
+                                                    self.scene.frame_end)
+            if self.fehler:
+                return False
+        try:
+            self.sim, self.info, self._halter = _sim_aufbauen(self.scene, domain, stand=stand)
+        except (OSError, ValueError) as e:
+            if stand is None:
+                raise
+            self.fehler = f"Saved state unreadable: {e}"
+            return False
         if self.sim is None:
             self.fehler = "Domain has no extent"
             return False
-        cache.leeren(self.pfad)
+        self._gitter = (masse, tuple(versatz))
+        if stand is None:
+            cache.leeren(self.pfad)
+        else:
+            cache.frames_nach_loeschen(self.pfad, stand["frame"])
+            self._vorher = stand.get("dauer", 0.0)
+            self._gesichert = stand["frame"]
         if engine_erweiterungen().get("gpu"):
             from ..ffengine import gpu
             gpu.reset_counters()
         self.info["frames"] = [self.scene.frame_start, self.scene.frame_end]
         cache.info_schreiben(self.pfad, self.info)
-        self.frame = self.scene.frame_start
-        self.gesamt = self.scene.frame_end - self.scene.frame_start + 1
+        self._erster = self.scene.frame_start
+        self.frame = stand["frame"] + 1 if stand else self.scene.frame_start
+        self.gesamt = self.scene.frame_end - self.frame + 1
         self.start = time.time()
         return True
 
     def schritt(self):
-        """Compute one frame. True as long as there is still something to do."""
-        if self.frame is None or self.frame > self.scene.frame_end:
+        """Compute one frame. True as long as there is still something to do.
+        EngineFehler when the engine raised; after that nothing is computed."""
+        dt = self.schritt_beginnen()
+        if dt is None:
             return False
-        fps = self.scene.render.fps / self.scene.render.fps_base
-        self.sim.update(1.0 / fps)
+        self.schritt_rechnen(dt)
+        weiter, faellig = self.schritt_beenden()
+        if faellig:
+            self.zwischenstand_sichern()
+        return weiter
+
+    def schritt_beginnen(self):
+        """Main thread: the time step of the next frame, or None when there
+        is nothing left to compute."""
+        scene = self.scene
+        if (scene is None or self.frame is None or self.frame > scene.frame_end
+                or self.engine_fehler):
+            return None
+        # Until the frame is written the engine is mid-frame or a frame ahead
+        # of self.frame: no saved state from it (zwischenstand_sichern)
+        self._offen = True
+        return scene.render.fps_base / scene.render.fps
+
+    def schritt_rechnen(self, dt):
+        """Any thread: the engine computes the frame and its results go into
+        the cache. Reads and writes no Blender data."""
+        try:
+            self.sim.update(dt)
+        except RuntimeError as e:
+            self.engine_fehler = engine_fehler_text(self.frame, e)
+            raise EngineFehler(self.engine_fehler) from e
         cache.mesh_schreiben(self.pfad, self.frame, self.sim.get_surface_data())
         if self.sim.enable_preview_mesh_output:
             cache.mesh_schreiben(self.pfad, self.frame,
@@ -533,9 +692,64 @@ class Backer:
                     self.sim.get_diffuse_particle_type_data())
             except Exception:
                 pass
+
+    def schritt_beenden(self):
+        """Main thread, after schritt_rechnen: count the frame. Returns
+        (more frames to compute, a saved state is due)."""
         self.fertig += 1
         self.frame += 1
-        return self.frame <= self.scene.frame_end
+        self._offen = False
+        scene = self.scene
+        fertig = scene is None or self.frame > scene.frame_end
+        domain = geometrie.finde_domain(scene) if scene is not None else None
+        faellig = (domain is not None and domain.hydrokit.zwischenstand_an
+                   and (fertig or (self.frame - self._erster) % domain.hydrokit.zwischenstand_alle == 0))
+        return not fertig, faellig
+
+    def zwischenstand_sichern(self):
+        """Save the state after the last finished frame. A full disk or an
+        engine without the functions costs the saved state, never the bake.
+        True if the state is current.
+
+        Not after a failed frame, an engine error (EngineFehler) included:
+        sim_ops' error path cancels with a save, and the engine then held the
+        next frame or half of one. Measured 05.11.2026: frame 8 failed while
+        writing its mesh, the state said frame 7 with the particles of frame
+        8, and every resumed frame showed the one after it (water volume
+        +0.5 %, exactly the next frame's). The state saved before stays."""
+        frame = self.zwischenstand_pruefen()
+        if frame is None:
+            return self.fertig > 0 and not self._offen and self._gesichert == self.frame - 1
+        return self.zwischenstand_schreiben(frame)
+
+    def zwischenstand_pruefen(self):
+        """Main thread: the frame whose state is to be saved now, or None
+        (nothing new, switched off, a failed frame, an engine without it)."""
+        if self.sim is None or self.fertig == 0 or self._offen:
+            return None
+        frame = self.frame - 1
+        if self._gesichert == frame:
+            return None
+        scene = self.scene
+        domain = geometrie.finde_domain(scene) if scene is not None else None
+        if domain is None or not domain.hydrokit.zwischenstand_an \
+                or not engine_erweiterungen().get("zwischenstand"):
+            return None
+        return frame
+
+    def zwischenstand_schreiben(self, frame):
+        """Any thread: write the state after `frame`. True if written."""
+        masse, versatz = self._gitter
+        try:
+            zwischenstand.schreiben(self.sim, self.pfad, frame, self._erster, masse[:3],
+                                    masse[3], versatz, round(self._vorher + self.dauer, 1))
+        except Exception as e:
+            self.zwischenstand_fehler = f"{type(e).__name__}: {e}"
+            print(f"HyprW: no saved state at frame {frame}: {self.zwischenstand_fehler}")
+            return False
+        self.zwischenstand_fehler = None
+        self._gesichert = frame
+        return True
 
     @property
     def dauer(self):
@@ -545,9 +759,10 @@ class Backer:
         """Note in info.json how long the bake took (shown in the panel), and
         the End it ran to: schritt follows an End changed during the bake."""
         if self.pfad and self.info is not None and self.start:
-            self.info["dauer"] = round(self.dauer, 1)
-            if self.info.get("frames"):
-                self.info["frames"] = [self.info["frames"][0], self.scene.frame_end]
+            self.info["dauer"] = round(self._vorher + self.dauer, 1)
+            scene = self.scene
+            if self.info.get("frames") and scene is not None:
+                self.info["frames"] = [self.info["frames"][0], scene.frame_end]
             try:
                 cache.info_schreiben(self.pfad, self.info)
             except OSError:
@@ -559,7 +774,8 @@ class Backer:
             return None, False
         gpu_daten = (self.info or {}).get("gpu", {})
         auf_gpu = gpu_daten.get("stufen", [])
-        domain = geometrie.finde_domain(self.scene)
+        scene = self.scene
+        domain = geometrie.finde_domain(scene) if scene is not None else None
         gewuenscht = [key for key, *_ in STUFEN
                       if domain is not None and geraet(domain.hydrokit, key) == 'GPU']
         namen = dict((e[0], e[1]) for e in STUFEN)
@@ -592,20 +808,101 @@ class Backer:
             gpu.release()
 
 
-def backen(scene, fortschritt=None, abbruch=None):
+class Hintergrund:
+    """Runs a Backer's frames in a worker thread, driven from the modal
+    operator's timer (tick), so Blender stays usable while a frame computes.
+
+    Before, the engine ran on the main thread: at Resolution 1000 Blender
+    stood still for two to three minutes per frame, the viewport stayed
+    empty after a redraw and Esc only arrived between two frames. The engine
+    never touches Blender's data, and ctypes releases Python's lock for the
+    length of a call. Everything that reads the scene stays on the main
+    thread (Backer.schritt_beginnen, schritt_beenden, zwischenstand_pruefen).
+    A frame cannot be stopped half-way: a cancel takes effect when the frame
+    being computed is done, and that frame is kept."""
+
+    RECHNET, FRAME, FERTIG = "rechnet", "frame", "fertig"
+
+    def __init__(self, backer):
+        self.backer = backer
+        self.abbrechen = False          # set by the operator: stop after this frame
+        self._faden = None
+        self._art = None                # 'frame' or 'stand'
+        self._fehler = None
+        self._weiter = True
+
+    @property
+    def abgebrochen(self):
+        """Stopped before its last frame."""
+        return self.abbrechen and self._weiter
+
+    def _starten(self, art, fn, *args):
+        def lauf():
+            try:
+                fn(*args)
+            except BaseException as e:      # raised again on the main thread
+                self._fehler = e
+        self._art, self._fehler = art, None
+        self._faden = threading.Thread(target=lauf, name="HyprW bake", daemon=True)
+        self._faden.start()
+
+    def tick(self):
+        """Main thread, on every timer event. RECHNET while the worker is
+        busy; FRAME when this call counted a finished frame and the bake goes
+        on (computing the next one or saving a state); FERTIG when nothing is
+        left or the bake was cancelled. Raises what the worker raised."""
+        b = self.backer
+        neu = False
+        if self._faden is not None:
+            if self._faden.is_alive():
+                return self.RECHNET
+            self._faden = None
+            fehler, self._fehler = self._fehler, None
+            if fehler is not None:
+                raise fehler
+            if self._art == 'frame':
+                self._weiter, faellig = b.schritt_beenden()
+                neu = True
+                # a bake that ends here leaves its state, so Resume goes on
+                frame = (b.zwischenstand_pruefen()
+                         if faellig or not self._weiter or self.abbrechen else None)
+                if frame is not None:
+                    self._starten('stand', b.zwischenstand_schreiben, frame)
+                    return self.FRAME
+        if not self._weiter or self.abbrechen:
+            return self.FERTIG
+        dt = b.schritt_beginnen()
+        if dt is None:
+            self._weiter = False
+            return self.FERTIG
+        self._starten('frame', b.schritt_rechnen, dt)
+        return self.FRAME if neu else self.RECHNET
+
+    def warten(self):
+        """Until the worker is done: before the engine is freed (another
+        file is opened, Blender quits). Up to the rest of the frame."""
+        faden = self._faden
+        if faden is not None:
+            faden.join()
+
+
+def backen(scene, fortschritt=None, abbruch=None, weiter=False):
     """Compute everything in one go — for scripts and background mode."""
     b = Backer(scene)
-    if not b.vorbereiten():
+    if not b.vorbereiten(weiter):
         return 0, 0.0, b.fehler
     weiter = True
     while weiter:
         if abbruch is not None and abbruch():
             break
         frame = b.frame
-        weiter = b.schritt()
+        try:
+            weiter = b.schritt()
+        except EngineFehler:
+            break
         if fortschritt is not None:
             fortschritt(frame, b.fertig, b.gesamt)
     dauer = b.dauer
     b.abschliessen()
     b.aufraeumen()
-    return b.fertig, dauer, None
+    return b.fertig, dauer, b.engine_fehler

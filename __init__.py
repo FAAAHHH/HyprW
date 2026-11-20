@@ -4,11 +4,11 @@
 
 from .properties import scene_properties, object_properties
 from .operators import materials_ops, sim_ops
-from .ui import sim_panel, gitter, scrollen
+from .ui import hilfe, sim_panel, gitter, scrollen
 
 # Order matters: properties first, panels last
 _modules = (scene_properties, object_properties, materials_ops, sim_ops,
-            sim_panel, gitter, scrollen)
+            hilfe, sim_panel, gitter, scrollen)
 
 
 def register():

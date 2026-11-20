@@ -372,6 +372,70 @@ and thread count give bit-identical particles — the regression test of
 section 9. Scenes with an inflow still differ by float rounding (about
 1e-5 m on the new particles).
 
+## 11. Saved states (resuming a bake)
+
+HyprW saves the water particles during a bake and loads them to resume
+(`sim/zwischenstand.py`), with the engine's own `get_*_data_range` and
+`load_*_data` as FLIP Fluids' savestates do. Two things were missing for
+adaptive particle sizes: the level per particle (a merged particle loaded
+without it counts as one standard particle, the water loses volume) and the
+timers of the regular split and merge passes. New:
+`has_marker_particle_level_data()`,
+`get_marker_particle_level_data_range(start, end)`,
+`load_marker_particle_level_data(n, data)` (taken together with each
+particle in `_loadMarkerParticles`, so one dropped there cannot shift the
+rest), `get_adaptive_particle_times()`, `set_adaptive_particle_times(time,
+next_pass)`. HyprW checks for them (extension "Saved states"): an older
+library bakes without states.
+
+Measured (Resolution 60, 40 frames, adaptive on, stopped at frame 20 and
+resumed): water volume within 1 of 224,536 standard particles of the
+uninterrupted bake, mesh volume within 0.06 %; two uninterrupted bakes
+differ by 0.03 %.
+
+## 12. Anisotropic surface
+
+The engine meshes the water as a union of spheres (radius 0.93 dx with
+FLIP Fluids' particle scale 3), smoothed afterwards. That swells the water:
++52 % on a jittered test block, +19 % on the learning scene (10.1 m3 for the
+8.44 m3 its 159,959 particles stand for, dx^3 / 8 each), and the pool looks
+like gel. New in `hkaniso.cpp`, switched by `enable_anisotropic_meshing()`
+(extension "Anisotropic surface"):
+
+- Kernels after Yu & Turk ("Reconstructing Surfaces of Particle-Based Fluids
+  Using Anisotropic Kernels", SCA 2010; parameters checked in the paper):
+  weighted covariance of the neighbours within 1.5 dx (w = 1 - (d/r)^3),
+  stretch at most 4 : 1, isotropic below 25 neighbours, kernel radius
+  1.2 dx, centres moved halfway to the neighbours' mean. Only at the surface
+  and in thin sheets: inside, the FLIP layers made flat kernels stripe the
+  field. Particle volume from the densest neighbour's density.
+- The field is smoothed with a Gaussian (`anisotropic_meshing_smoothness`,
+  sigma in dx, default 0.5) and cut where it holds the particles' volume:
+  a histogram over all compute chunks before meshing
+  (`ParticleMesher::_anisoCalibrate`). Nodes near obstacles and domain walls
+  count with the part of their cell outside the solid, as the polygonizer
+  cuts there. A fixed threshold lost 23 % of the water in the prototype and
+  broke the pool into "crushed ice".
+- The mesh is smoothed with Taubin (0.5 / -0.53, 20 rounds) instead of
+  Laplace, so it keeps the calibrated volume.
+
+The field is computed on the CPU (the GPU field of the spheres is skipped);
+marching cubes and the preview mesh stay as they are. Prototype in numpy:
+`~/hk_testlauf/netz/proto/proto.py`.
+
+Measured, learning scene resumed at frame 105, Resolution 80:
+
+| | mesh volume vs particles | loose pieces | time per frame |
+|---|---|---|---|
+| spheres (frame 105) | +19 % | 49 | — |
+| Mesh Detail 1 | +3.6 % | 30-39 | 1.3 s |
+| Mesh Detail 2 | +0.9 to +1.0 % (frames 106-120) | 30-47 | 1.7 s |
+| Mesh Detail 3 | +0.4 % | 39-47 | 2.9 s |
+| Detail 2, smoothness 0 / 1.5 | +4.4 % / +0.2 % | 115 / 2 | — |
+
+Times include the simulation step. Frame to frame the volume changes by at
+most 0.2 %: no flicker from the threshold chosen anew each frame.
+
 ## Lens drops (sim/linse.py, no engine change)
 
 Computed after baking from the cache; the sources for each part:
@@ -419,3 +483,6 @@ A loaded `.so` cannot be reloaded: restart Blender after a rebuild.
 ## Checked
 
 `git apply --check` against the unchanged state: applies cleanly.
+10.11.2026: built from upstream `70a0e95` plus this patch, the library has
+the size and the 4151 exported functions of the shipped one; it differs only
+by the source path the compiler embeds.

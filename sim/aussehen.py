@@ -686,6 +686,163 @@ def _gruppe_nebel(name, radius, dichte, material, voxel):
     return ng
 
 
+# LIGHT MIST WHILE THE TIMELINE PLAYS. A baked waterfall played back at 0.7
+# frames per second while the paused viewport was smooth. The mist volume was
+# the largest part of HyprW's own work per frame: measured on that waterfall
+# (Blender 5.2, i7-11850H, 4 threads, 26 cm cells) 173 ms at 448,000 mist
+# points, 417 ms at 1.04 million and 556 ms at 1.14 million, about three
+# quarters of it Points to Volume (OpenVDB rasterises one sphere per point),
+# the rest mostly Grid Mean. Coarser cells alone hardly help, the cost is per
+# point. While the timeline plays, a second modifier (LEICHT_MOD, never
+# rendered) draws the mist instead from
+#   at most NEBEL_LEICHT_PUNKTE points, chosen by their random value from the
+#   engine ID: the same drops stay chosen from frame to frame, no flicker;
+#   each one larger by share^(-1/3), which keeps the total volume of the
+#   spheres, so thin mist does not simply vanish;
+#   cells of r / NEBEL_LEICHT_RADIUS_VOXEL, one step of dilate and of mean.
+# Measured: 12, 15 and 19 ms, the cost hardly grows with the mist; a whole
+# frame change of that scene went from 815 to 631, 1,111 to 729 and 1,611 to
+# 1,080 ms. The grid's bounding box has 54,000 instead of 4.1 million cells
+# (81,000 instead of 14.9 million). It looks like the full mist, softer, and
+# isolated wisps fade out: of the density summed over the cells 74 and 69 %
+# are left, 41 % at Resolution 300 where more of the mist is thin wisps. An
+# APPROXIMATION that only the viewport shows, and only while playing
+# (scene.hydrokit.abspielen_leicht, sim/abspielen_aussehen.py). Paused, the
+# modifier stack is exactly the one from before.
+NEBEL_LEICHT_PUNKTE = 50_000
+NEBEL_LEICHT_RADIUS_VOXEL = 0.75
+LEICHT_MOD = "HK Light Playback"
+LEICHT_GRUPPE = "HK Nebel Light"
+LEICHT_STAND = 1          # raise when the light group changes: it is rebuilt then
+LEICHT_QUELLE = "hk_quelle"
+
+
+def _nebel_werte(voll):
+    """(radius, density, material) of a full mist group, read from its Points
+    to Volume and Set Material nodes; None if it draws no volume from fixed
+    values. Read from the group, not from the settings: a look sized for
+    other cells (look_stand 'veraltet') stays exactly as it renders."""
+    p2v = next((n for n in voll.nodes if n.bl_idname == "GeometryNodePointsToVolume"), None)
+    if p2v is None or p2v.inputs["Radius"].is_linked or p2v.inputs["Density"].is_linked:
+        return None
+    setm = next((n for n in voll.nodes if n.bl_idname == "GeometryNodeSetMaterial"), None)
+    material = setm.inputs["Material"].default_value if setm is not None else None
+    return (max(float(p2v.inputs["Radius"].default_value), 1e-4),
+            float(p2v.inputs["Density"].default_value), material)
+
+
+def _gruppe_nebel_leicht(voll):
+    """The light mist for playback, built from the full mist group `voll`;
+    None if there is none to build. Rebuilt only when its source values
+    change, so switching it on costs no rebuild."""
+    if voll.name == LEICHT_GRUPPE:
+        return None
+    werte = _nebel_werte(voll)
+    if werte is None:
+        return None
+    radius, dichte, material = werte
+    quelle = (f"{LEICHT_STAND} {NEBEL_LEICHT_PUNKTE} {NEBEL_LEICHT_RADIUS_VOXEL!r} "
+              f"{radius!r} {dichte!r} {material.name if material is not None else ''}")
+    ng = bpy.data.node_groups.get(LEICHT_GRUPPE)
+    if ng is None:
+        ng = bpy.data.node_groups.new(LEICHT_GRUPPE, "GeometryNodeTree")
+    elif ng.bl_idname != "GeometryNodeTree" or ng.library is not None:
+        return None             # a group of someone else's under this name
+    elif ng.get(LEICHT_QUELLE) == quelle:
+        return ng
+    ng.nodes.clear(); ng.links.clear()
+    vorhanden = {(i.name, i.in_out) for i in ng.interface.items_tree
+                 if i.item_type == 'SOCKET'}
+    for richtung in ('INPUT', 'OUTPUT'):
+        if ("Geometry", richtung) not in vorhanden:
+            ng.interface.new_socket("Geometry", in_out=richtung,
+                                    socket_type='NodeSocketGeometry')
+    n, L = ng.nodes, ng.links
+    gi = n.new("NodeGroupInput"); gi.location = (-1300, 0)
+    zahl = n.new("GeometryNodeAttributeDomainSize"); zahl.location = (-1100, -320)
+    zahl.component = 'MESH'
+    L.new(gi.outputs[0], zahl.inputs[0])
+    punkte = zahl.outputs["Point Count"]
+    # Share of the points that is drawn: at most NEBEL_LEICHT_PUNKTE
+    anteil = _zahl(ng, 'MINIMUM',
+                   _zahl(ng, 'DIVIDE', float(NEBEL_LEICHT_PUNKTE),
+                         _zahl(ng, 'MAXIMUM', punkte, 1.0, ort=(-900, -320)),
+                         ort=(-720, -320)),
+                   1.0, ort=(-540, -320))
+    # Which: the random value from the engine ID. Points without it (written
+    # by something else) by a hash of their index; modulo first, or float32
+    # leaves too few digits after the point for large indices
+    zufall = n.new("GeometryNodeInputNamedAttribute"); zufall.location = (-900, -520)
+    zufall.data_type = 'FLOAT'
+    zufall.inputs["Name"].default_value = ZUFALL
+    index = n.new("GeometryNodeInputIndex"); index.location = (-1280, -700)
+    streu = _zahl(ng, 'FRACT',
+                  _zahl(ng, 'MULTIPLY',
+                        _zahl(ng, 'MODULO', index.outputs[0], 65536.0, ort=(-1100, -700)),
+                        0.6180339887, ort=(-900, -700)),
+                  ort=(-720, -700))
+    wert = n.new("GeometryNodeSwitch"); wert.location = (-540, -560)
+    wert.input_type = 'FLOAT'
+    L.new(zufall.outputs["Exists"], wert.inputs["Switch"])
+    L.new(streu, wert.inputs["False"])
+    L.new(zufall.outputs["Attribute"], wert.inputs["True"])
+    wahl = n.new("FunctionNodeCompare"); wahl.location = (-360, -420)
+    wahl.data_type = 'FLOAT'; wahl.operation = 'LESS_EQUAL'
+    L.new(wert.outputs[0], wahl.inputs[0])
+    L.new(anteil, wahl.inputs[1])
+    m2p = n.new("GeometryNodeMeshToPoints"); m2p.location = (-180, 0)
+    L.new(gi.outputs[0], m2p.inputs["Mesh"])
+    L.new(wahl.outputs[0], m2p.inputs["Selection"])
+    # Each drawn drop the larger: the same total volume of spheres
+    r = _zahl(ng, 'MULTIPLY', _zahl(ng, 'POWER', anteil, -1.0 / 3.0, ort=(-360, -220)),
+              radius, ort=(-180, -220))
+    voxel = _zahl(ng, 'DIVIDE', r, NEBEL_LEICHT_RADIUS_VOXEL, ort=(0, -220))
+    p2v = n.new("GeometryNodePointsToVolume"); p2v.location = (180, 0)
+    p2v.inputs["Density"].default_value = dichte
+    p2v.inputs["Resolution Mode"].default_value = 'Size'
+    L.new(m2p.outputs["Points"], p2v.inputs["Points"])
+    L.new(voxel, p2v.inputs["Voxel Size"])
+    L.new(r, p2v.inputs["Radius"])
+    holen = n.new("GeometryNodeGetNamedGrid"); holen.location = (380, 0)
+    holen.inputs["Name"].default_value = "density"
+    holen.inputs["Remove"].default_value = True
+    weiten = n.new("GeometryNodeGridDilateAndErode"); weiten.location = (580, -120)
+    weiten.inputs["Steps"].default_value = 1
+    glatt = n.new("GeometryNodeGridMean"); glatt.location = (780, -120)
+    glatt.inputs["Width"].default_value = 1
+    glatt.inputs["Iterations"].default_value = 1
+    ablegen = n.new("GeometryNodeStoreNamedGrid"); ablegen.location = (980, 0)
+    ablegen.inputs["Name"].default_value = "density"
+    setm = n.new("GeometryNodeSetMaterial"); setm.location = (1180, 0)
+    setm.inputs["Material"].default_value = material
+    L.new(p2v.outputs["Volume"], holen.inputs["Volume"])
+    L.new(holen.outputs["Grid"], weiten.inputs["Grid"])
+    L.new(weiten.outputs["Grid"], glatt.inputs["Grid"])
+    L.new(holen.outputs["Volume"], ablegen.inputs["Volume"])
+    L.new(glatt.outputs["Grid"], ablegen.inputs["Grid"])
+    L.new(ablegen.outputs["Volume"], setm.inputs["Geometry"])
+    # Only in the viewport and only on mist points: a render, the full look's
+    # volume (both modifiers on) or an empty frame pass through unchanged
+    ansicht = n.new("GeometryNodeIsViewport"); ansicht.location = (980, 300)
+    hat = n.new("FunctionNodeCompare"); hat.location = (980, 460)
+    hat.data_type = 'FLOAT'; hat.operation = 'GREATER_THAN'
+    L.new(punkte, hat.inputs[0])
+    hat.inputs[1].default_value = 0.5
+    beides = n.new("FunctionNodeBooleanMath"); beides.location = (1180, 380)
+    beides.operation = 'AND'
+    L.new(ansicht.outputs[0], beides.inputs[0])
+    L.new(hat.outputs[0], beides.inputs[1])
+    weiche = n.new("GeometryNodeSwitch"); weiche.location = (1380, 200)
+    weiche.input_type = 'GEOMETRY'
+    L.new(beides.outputs[0], weiche.inputs["Switch"])
+    L.new(gi.outputs[0], weiche.inputs["False"])
+    L.new(setm.outputs["Geometry"], weiche.inputs["True"])
+    out = n.new("NodeGroupOutput"); out.location = (1580, 200)
+    L.new(weiche.outputs[0], out.inputs[0])
+    ng[LEICHT_QUELLE] = quelle
+    return ng
+
+
 def _eevee_volumen(scene, domain):
     """EEVEE draws volumes in tiles and depth slices. The defaults
     (8-pixel tiles, slices up to 100 m) make mist coarse in the viewport
@@ -718,12 +875,119 @@ def _eevee_volumen(scene, domain):
         e.volumetric_samples = 128
 
 
+def _haupt_modifier(obj):
+    """The modifier with the full look: the first Geometry Nodes modifier
+    that is not the light one for playback."""
+    return next((m for m in obj.modifiers if m.type == 'NODES' and m.name != LEICHT_MOD), None)
+
+
 def _modifier_setzen(obj, ng):
-    mod = next((m for m in obj.modifiers if m.type == 'NODES'), None)
+    mod = _haupt_modifier(obj)
     if mod is None:
         mod = obj.modifiers.new("HK Aussehen", 'NODES')
     mod.node_group = ng
     return mod
+
+
+# Objects whose full look this session switched off for playback. If the
+# light modifier is deleted while playing, this is what still brings the full
+# look back. Not kept across files: there the light modifier is the sign.
+_ABGESCHALTET = set()
+
+
+def _leicht_an(obj):
+    """Full look off and the light one on, in the viewport only. Not if the
+    user switched the look off in the viewport or it draws no volume from
+    fixed values. True if switched now."""
+    haupt = _haupt_modifier(obj)
+    leicht = obj.modifiers.get(LEICHT_MOD)
+    if (obj.library is not None or haupt is None or haupt.node_group is None
+            or not haupt.show_viewport or (leicht is not None and leicht.type != 'NODES')):
+        return False
+    ng = _gruppe_nebel_leicht(haupt.node_group)
+    if ng is None:
+        return False
+    if leicht is None:
+        leicht = obj.modifiers.new(LEICHT_MOD, 'NODES')
+        leicht.show_expanded = False
+    leicht.show_render = False          # renders never see it
+    leicht.show_in_editmode = False
+    if leicht.node_group != ng:
+        leicht.node_group = ng
+    # right after the full look, where its result would be
+    mods = list(obj.modifiers)
+    i, j = mods.index(haupt), mods.index(leicht)
+    if j != i + 1:
+        obj.modifiers.move(j, i + 1 if j > i else i)
+    leicht.show_viewport = True
+    haupt.show_viewport = False         # its render switch stays as it is
+    _ABGESCHALTET.add(obj.name)
+    return True
+
+
+def _leicht_aus(obj):
+    """Back to exactly the stack from before: the light modifier removed and
+    the full look on in the viewport again, if the light one or this session
+    had switched it off. True if something changed."""
+    leicht = obj.modifiers.get(LEICHT_MOD)
+    if leicht is not None and leicht.type != 'NODES':
+        leicht = None
+    war = leicht is not None or obj.name in _ABGESCHALTET
+    _ABGESCHALTET.discard(obj.name)
+    if not war:
+        return False
+    if leicht is not None:
+        obj.modifiers.remove(leicht)
+    haupt = _haupt_modifier(obj)
+    if haupt is not None and not haupt.show_viewport:
+        haupt.show_viewport = True
+    return True
+
+
+def ist_leicht(scene):
+    """True if the scene's mist shows the light look."""
+    obj = scene.objects.get(_ARTEN_NAMEN["nebel"][0]) if scene is not None else None
+    leicht = obj.modifiers.get(LEICHT_MOD) if obj is not None else None
+    return leicht is not None and leicht.show_viewport
+
+
+def abspielen_leicht(scene, an):
+    """an=True while the timeline plays: the viewport draws the light mist
+    (NEBEL_LEICHT_PUNKTE) instead of the full one. an=False: the full look
+    and exactly the modifier stack from before. Renders always get the full
+    look: the light modifier is off for rendering and the full one keeps its
+    render switch. True if something was switched."""
+    if not an:
+        return alles_voll() > 0
+    name = _ARTEN_NAMEN["nebel"][0]
+    obj = scene.objects.get(name) if scene is not None else None
+    if obj is None or obj.type != 'MESH':
+        return False
+    try:
+        return _leicht_an(obj)
+    except (AttributeError, RuntimeError, TypeError, ValueError) as e:
+        print(f"HyprW: light mist for playback ({e})")
+        return False
+
+
+def alles_voll(geladen=False):
+    """Every object back to its full look: when playback stops, before
+    saving, after opening a file or an undo, when the add-on is switched off.
+    A file never keeps the light mist. geladen: right after opening a file,
+    when this session's names mean nothing. Number of objects switched back."""
+    if geladen:
+        _ABGESCHALTET.clear()
+    n = 0
+    for obj in bpy.data.objects:
+        if obj.library is not None or (obj.name not in _ABGESCHALTET
+                                       and obj.modifiers.get(LEICHT_MOD) is None):
+            continue
+        try:
+            n += _leicht_aus(obj)
+        except (AttributeError, RuntimeError, TypeError, ValueError) as e:
+            print(f"HyprW: full look for {obj.name} ({e})")
+    _ABGESCHALTET.clear()
+    return n
 
 
 def voxelgroesse(context):
@@ -768,7 +1032,7 @@ def look_stand(context, info=None):
     # earlier bake are emptied, not styled (anzeige._gischt_leeren)
     gischt = ([o for o in map(bpy.data.objects.get, GISCHT_OBJEKTE) if o is not None]
               if info.get("gischt") else [])
-    if any(not any(m.type == 'NODES' for m in o.modifiers) for o in gischt):
+    if any(_haupt_modifier(o) is None for o in gischt):
         return 'fehlt', "Whitewater has no look yet — renders black"
     if not any(m is not None for m in flaeche.data.materials):
         return 'fehlt', "The water has no material yet"
@@ -864,6 +1128,8 @@ def anwenden(context, wasser_variante=None, wasser=True):
             dichte *= props.nebel_dichte_anzeige / 2.0   # slider as a factor
             mat = baue_nebel_material(dichte, props.nebel_groesse, radius_nebel)
             ng = _gruppe_nebel("HK Nebel", radius_nebel, dichte, mat, voxel)
+            if obj.modifiers.get(LEICHT_MOD) is not None:
+                _gruppe_nebel_leicht(ng)    # playing: the light mist follows the look
             _eevee_volumen(scene, domain)
             radius = radius_nebel       # the report shows the real mist sphere
         else:

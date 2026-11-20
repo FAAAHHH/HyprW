@@ -359,8 +359,20 @@ def register():
     # Rebuild an outdated look when a file is opened (aussehen.MATERIAL_STAND)
     from ..sim import anzeige
     anzeige.lade_handler_an()
+    # The light mist while the timeline plays
+    from ..sim import abspielen_aussehen
+    abspielen_aussehen.lade_handler_an()
+    # Pause Other Animation: playback, save, load, undo and render handlers
+    from ..sim import szene_pause
+    szene_pause.handler_an()
 
 
 def unregister():
+    # The full mist back first: switched off while playing, the light one stayed
+    from ..sim import abspielen_aussehen
+    abspielen_aussehen.abschalten()
+    # Paused animation moves again while the scene settings still exist
+    from ..sim import szene_pause
+    szene_pause.handler_aus()
     from ..sim import anzeige
     anzeige.lade_handler_aus()

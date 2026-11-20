@@ -2,7 +2,7 @@ schema_version = "1.0.0"
 
 id = "hydrokit"
 type = "add-on"
-version = "1.1.0"
+version = "1.2.0"
 name = "HyprW"
 tagline = "Hyper realistic water: simulation, whitewater, mist, lens drops"
 maintainer = "FAAAHHH"
@@ -17,4 +17,4 @@ platforms = ["linux-x64"]
 files = "Reads and writes simulation caches"
 
 [build]
-paths_exclude_pattern = ["__pycache__/", "/.git/", "/.gitignore", "/tests/", "*.zip"]
+paths_exclude_pattern = ["__pycache__/", "/.git/", "/.gitignore", "/tests/", "/docs/", "/CLAUDE.md", "*.zip"]

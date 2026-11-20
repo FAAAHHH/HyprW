@@ -1,16 +1,17 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 35d1a49..8bbbbf6 100644
+index 35d1a49..54ee316 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -188,6 +188,7 @@ set(SOURCES_FLUID_ENGINE_LIBRARY
+@@ -188,6 +188,8 @@ set(SOURCES_FLUID_ENGINE_LIBRARY
      src/engine/gridindexkeymap.cpp
      src/engine/gridindexvector.cpp
      src/engine/gridutils.cpp
 +    src/engine/hkgpu.cpp
++    src/engine/hkaniso.cpp
      src/engine/influencegrid.cpp
      src/engine/interpolation.cpp
      src/engine/levelsetsolver.cpp
-@@ -218,6 +219,7 @@ set(SOURCES_FLUID_ENGINE_LIBRARY
+@@ -218,6 +220,7 @@ set(SOURCES_FLUID_ENGINE_LIBRARY
      src/engine/vmath.cpp
      src/engine/c_bindings/cbindings.cpp
      src/engine/c_bindings/fluidsimulation_c.cpp
@@ -18,7 +19,7 @@ index 35d1a49..8bbbbf6 100644
      src/engine/c_bindings/forcefield_c.cpp
      src/engine/c_bindings/forcefieldcurve_c.cpp
      src/engine/c_bindings/forcefieldgrid_c.cpp
-@@ -274,6 +276,8 @@ add_library(fluid_engine_objects OBJECT ${SOURCES_FLUID_ENGINE_LIBRARY})
+@@ -274,6 +277,8 @@ add_library(fluid_engine_objects OBJECT ${SOURCES_FLUID_ENGINE_LIBRARY})
  
  # FLIP Fluids Engine Library
  add_library(ffengine SHARED $<TARGET_OBJECTS:fluid_engine_objects>)
@@ -27,11 +28,67 @@ index 35d1a49..8bbbbf6 100644
  
  # Copy Libraries To Addon
  file(COPY "${CMAKE_SOURCE_DIR}/src/addon/" DESTINATION "${BLENDER_ADDON_DIR}")
+diff --git a/src/addon/utils/installation_utils.py b/src/addon/utils/installation_utils.py
+index ba173dc..6474269 100644
+--- a/src/addon/utils/installation_utils.py
++++ b/src/addon/utils/installation_utils.py
+@@ -23,7 +23,7 @@ IS_INSTALLATION_COMPLETE = False
+ IS_STABLE_BUILD = True
+ 
+ SUPPORT_LICENSE_TYPE = "GitHub"
+-SUPPORT_LICENSE_ID = "379LY"
++SUPPORT_LICENSE_ID = "992YZ"
+ 
+ IS_MIXBOX_SUPPORTED = False
+ IS_MIXBOX_INSTALLATION_COMPLETE = False
 diff --git a/src/engine/c_bindings/fluidsimulation_c.cpp b/src/engine/c_bindings/fluidsimulation_c.cpp
-index b5d98d7..d8e00a6 100644
+index b5d98d7..e3b0007 100644
 --- a/src/engine/c_bindings/fluidsimulation_c.cpp
 +++ b/src/engine/c_bindings/fluidsimulation_c.cpp
-@@ -2278,6 +2278,98 @@ extern "C" {
+@@ -658,6 +658,42 @@ extern "C" {
+         );
+     }
+ 
++    EXPORTDLL void FluidSimulation_enable_anisotropic_meshing(FluidSimulation* obj,
++                                                              int *err) {
++        CBindings::safe_execute_method_void_0param(
++            obj, &FluidSimulation::enableAnisotropicMeshing, err
++        );
++    }
++
++    EXPORTDLL void FluidSimulation_disable_anisotropic_meshing(FluidSimulation* obj,
++                                                               int *err) {
++        CBindings::safe_execute_method_void_0param(
++            obj, &FluidSimulation::disableAnisotropicMeshing, err
++        );
++    }
++
++    EXPORTDLL int FluidSimulation_is_anisotropic_meshing_enabled(FluidSimulation* obj,
++                                                                 int *err) {
++        return CBindings::safe_execute_method_ret_0param(
++            obj, &FluidSimulation::isAnisotropicMeshingEnabled, err
++        );
++    }
++
++    EXPORTDLL double FluidSimulation_get_anisotropic_meshing_smoothness(FluidSimulation* obj,
++                                                                        int *err) {
++        return CBindings::safe_execute_method_ret_0param(
++            obj, &FluidSimulation::getAnisotropicMeshingSmoothness, err
++        );
++    }
++
++    EXPORTDLL void FluidSimulation_set_anisotropic_meshing_smoothness(FluidSimulation* obj,
++                                                                      double s,
++                                                                      int *err) {
++        CBindings::safe_execute_method_void_1param(
++            obj, &FluidSimulation::setAnisotropicMeshingSmoothness, s, err
++        );
++    }
++
+     EXPORTDLL void FluidSimulation_enable_preview_mesh_output(FluidSimulation* obj,
+                                                               double dx,
+                                                               int *err) {
+@@ -2278,6 +2314,98 @@ extern "C" {
          );
      }
  
@@ -130,7 +187,7 @@ index b5d98d7..d8e00a6 100644
      EXPORTDLL void FluidSimulation_set_diffuse_spray_drag_coefficient(FluidSimulation* obj, 
                                                                        double d, int *err) {
          CBindings::safe_execute_method_void_1param(
-@@ -2671,6 +2763,108 @@ extern "C" {
+@@ -2671,6 +2799,108 @@ extern "C" {
          );
      }
  
@@ -239,6 +296,71 @@ index b5d98d7..d8e00a6 100644
      EXPORTDLL void FluidSimulation_add_body_force(FluidSimulation* obj,
                                                    double fx, double fy, double fz,
                                                    int *err) {
+@@ -5096,7 +5326,63 @@ extern "C" {
+         );
+     }
+ 
+-    EXPORTDLL void FluidSimulation_load_marker_particle_id_data(FluidSimulation* obj, 
++    EXPORTDLL int FluidSimulation_has_marker_particle_level_data(FluidSimulation* obj, int *err) {
++        *err = CBindings::SUCCESS;
++        try {
++            return obj->hasMarkerParticleLevelData() ? 1 : 0;
++        } catch (std::exception &ex) {
++            CBindings::set_error_message(ex);
++            *err = CBindings::FAIL;
++        }
++        return 0;
++    }
++
++    EXPORTDLL void FluidSimulation_get_marker_particle_level_data_range(FluidSimulation* obj,
++                                                                        size_t start_idx, size_t end_idx, char *c_data, int *err) {
++        *err = CBindings::SUCCESS;
++        try {
++            obj->getMarkerParticleLevelDataRange(start_idx, end_idx, c_data);
++        } catch (std::exception &ex) {
++            CBindings::set_error_message(ex);
++            *err = CBindings::FAIL;
++        }
++    }
++
++    EXPORTDLL void FluidSimulation_load_marker_particle_level_data(FluidSimulation* obj,
++                                                                   size_t size, char *c_data, int *err) {
++        *err = CBindings::SUCCESS;
++        try {
++            obj->loadMarkerParticleLevelData(size, c_data);
++        } catch (std::exception &ex) {
++            CBindings::set_error_message(ex);
++            *err = CBindings::FAIL;
++        }
++    }
++
++    EXPORTDLL double FluidSimulation_get_adaptive_particle_time(FluidSimulation* obj, int *err) {
++        return CBindings::safe_execute_method_ret_0param(
++            obj, &FluidSimulation::getAdaptiveParticleTime, err
++        );
++    }
++
++    EXPORTDLL double FluidSimulation_get_adaptive_particle_next_pass_time(FluidSimulation* obj, int *err) {
++        return CBindings::safe_execute_method_ret_0param(
++            obj, &FluidSimulation::getAdaptiveParticleNextPassTime, err
++        );
++    }
++
++    EXPORTDLL void FluidSimulation_set_adaptive_particle_times(FluidSimulation* obj,
++                                                               double time, double next_pass_time, int *err) {
++        *err = CBindings::SUCCESS;
++        try {
++            obj->setAdaptiveParticleTimes(time, next_pass_time);
++        } catch (std::exception &ex) {
++            CBindings::set_error_message(ex);
++            *err = CBindings::FAIL;
++        }
++    }
++
++    EXPORTDLL void FluidSimulation_load_marker_particle_id_data(FluidSimulation* obj,
+                                                                 FluidSimulationMarkerParticleIDData data, 
+                                                                 int *err) {
+         CBindings::safe_execute_method_void_1param(
 diff --git a/src/engine/c_bindings/hkgpu_c.cpp b/src/engine/c_bindings/hkgpu_c.cpp
 new file mode 100644
 index 0000000..2ef2e7d
@@ -1106,10 +1228,10 @@ index ddd30ca..613b8b0 100644
      double _sprayEmissionSpeedFactor = 1.0;
      double _sprayCollisionFriction = 0.0;
 diff --git a/src/engine/ffengine/fluidsimulation.py b/src/engine/ffengine/fluidsimulation.py
-index 6e4f37e..c9cac25 100644
+index 6e4f37e..05f7375 100644
 --- a/src/engine/ffengine/fluidsimulation.py
 +++ b/src/engine/ffengine/fluidsimulation.py
-@@ -586,6 +586,86 @@ class FluidSimulation(object):
+@@ -586,6 +586,114 @@ class FluidSimulation(object):
          pb.init_lib_func(libfunc, [c_void_p, c_void_p], None)
          pb.execute_lib_func(libfunc, [self()])
  
@@ -1128,6 +1250,34 @@ index 6e4f37e..c9cac25 100644
 +            libfunc = lib.FluidSimulation_disable_gpu_surface_meshing
 +        pb.init_lib_func(libfunc, [c_void_p, c_void_p], None)
 +        pb.execute_lib_func(libfunc, [self()])
++
++    @property
++    def enable_anisotropic_meshing(self):
++        """HydroKit: water surface from anisotropic kernels (hkaniso.h)."""
++        libfunc = lib.FluidSimulation_is_anisotropic_meshing_enabled
++        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
++        return bool(pb.execute_lib_func(libfunc, [self()]))
++
++    @enable_anisotropic_meshing.setter
++    def enable_anisotropic_meshing(self, boolval):
++        if boolval:
++            libfunc = lib.FluidSimulation_enable_anisotropic_meshing
++        else:
++            libfunc = lib.FluidSimulation_disable_anisotropic_meshing
++        pb.init_lib_func(libfunc, [c_void_p, c_void_p], None)
++        pb.execute_lib_func(libfunc, [self()])
++
++    @property
++    def anisotropic_meshing_smoothness(self):
++        libfunc = lib.FluidSimulation_get_anisotropic_meshing_smoothness
++        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_double)
++        return pb.execute_lib_func(libfunc, [self()])
++
++    @anisotropic_meshing_smoothness.setter
++    def anisotropic_meshing_smoothness(self, s):
++        libfunc = lib.FluidSimulation_set_anisotropic_meshing_smoothness
++        pb.init_lib_func(libfunc, [c_void_p, c_double, c_void_p], None)
++        pb.execute_lib_func(libfunc, [self(), s])
 +
 +    @property
 +    def enable_gpu_whitewater(self):
@@ -1196,7 +1346,7 @@ index 6e4f37e..c9cac25 100644
      @property
      def enable_preview_mesh_output(self):
          libfunc = lib.FluidSimulation_is_preview_mesh_output_enabled
-@@ -2201,6 +2281,185 @@ class FluidSimulation(object):
+@@ -2201,6 +2309,185 @@ class FluidSimulation(object):
          pb.init_lib_func(libfunc, [c_void_p, c_int, c_void_p], None)
          pb.execute_lib_func(libfunc, [self(), int(n)])
  
@@ -1382,6 +1532,44 @@ index 6e4f37e..c9cac25 100644
      @decorators.xyz_or_vector
      def add_body_force(self, fx, fy, fz):
          libfunc = lib.FluidSimulation_add_body_force
+@@ -3292,6 +3579,37 @@ class FluidSimulation(object):
+         pb.init_lib_func(libfunc, [c_void_p, FluidSimulationMarkerParticleIDData_t, c_void_p], None)
+         pb.execute_lib_func(libfunc, [self(), pdata])
+ 
++    # HydroKit: resuming a bake with adaptive particle sizes
++    def has_marker_particle_level_data(self):
++        libfunc = lib.FluidSimulation_has_marker_particle_level_data
++        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
++        return bool(pb.execute_lib_func(libfunc, [self()]))
++
++    def get_marker_particle_level_data_range(self, start_idx, end_idx):
++        size_of_char = 1
++        return self._get_output_data_range(lib.FluidSimulation_get_marker_particle_level_data_range,
++                                           start_idx, end_idx, size_of_char)
++
++    def load_marker_particle_level_data(self, num_particles, level_data):
++        c_level_data = (c_char * len(level_data)).from_buffer_copy(level_data)
++        libfunc = lib.FluidSimulation_load_marker_particle_level_data
++        pb.init_lib_func(libfunc, [c_void_p, c_size_t, c_char_p, c_void_p], None)
++        pb.execute_lib_func(libfunc, [self(), c_size_t(num_particles),
++                                      ctypes.cast(c_level_data, c_char_p)])
++
++    def get_adaptive_particle_times(self):
++        libfunc = lib.FluidSimulation_get_adaptive_particle_time
++        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_double)
++        zeit = pb.execute_lib_func(libfunc, [self()])
++        libfunc = lib.FluidSimulation_get_adaptive_particle_next_pass_time
++        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_double)
++        return zeit, pb.execute_lib_func(libfunc, [self()])
++
++    def set_adaptive_particle_times(self, time, next_pass_time):
++        libfunc = lib.FluidSimulation_set_adaptive_particle_times
++        pb.init_lib_func(libfunc, [c_void_p, c_double, c_double, c_void_p], None)
++        pb.execute_lib_func(libfunc, [self(), time, next_pass_time])
++
+     def load_diffuse_particle_data(self, num_particles, position_data, velocity_data,
+                                          lifetime_data, type_data, id_data):
+         c_position_data = (c_char * len(position_data)).from_buffer_copy(position_data)
 diff --git a/src/engine/ffengine/gpu.py b/src/engine/ffengine/gpu.py
 new file mode 100644
 index 0000000..baa5627
@@ -1511,7 +1699,7 @@ index 0000000..baa5627
 +    return (_call("HKGPU_get_verify_gpu_time", [c_int], c_double, [nummer]),
 +            _call("HKGPU_get_verify_cpu_time", [c_int], c_double, [nummer]))
 diff --git a/src/engine/fluidsimulation.cpp b/src/engine/fluidsimulation.cpp
-index 10989a7..be25fb1 100644
+index 10989a7..b583683 100644
 --- a/src/engine/fluidsimulation.cpp
 +++ b/src/engine/fluidsimulation.cpp
 @@ -23,6 +23,7 @@ SOFTWARE.
@@ -1532,7 +1720,7 @@ index 10989a7..be25fb1 100644
  #include "viscositysolver.h"
  #include "particlemesher.h"
  #include "polygonizer3d.h"
-@@ -602,6 +606,96 @@ void FluidSimulation::disableAsynchronousMeshing() {
+@@ -602,6 +606,125 @@ void FluidSimulation::disableAsynchronousMeshing() {
      _isAsynchronousMeshingEnabled = false;
  }
  
@@ -1552,6 +1740,35 @@ index 10989a7..be25fb1 100644
 +
 +bool FluidSimulation::isGPUSurfaceMeshingEnabled() {
 +    return _isGPUSurfaceMeshingEnabled;
++}
++
++void FluidSimulation::enableAnisotropicMeshing() {
++    _logfile.log(std::ostringstream().flush() << 
++                 _logfile.getTime() << " enableAnisotropicMeshing" << std::endl);
++
++    _isAnisotropicMeshingEnabled = true;
++}
++
++void FluidSimulation::disableAnisotropicMeshing() {
++    _logfile.log(std::ostringstream().flush() << 
++                 _logfile.getTime() << " disableAnisotropicMeshing" << std::endl);
++
++    _isAnisotropicMeshingEnabled = false;
++}
++
++bool FluidSimulation::isAnisotropicMeshingEnabled() {
++    return _isAnisotropicMeshingEnabled;
++}
++
++double FluidSimulation::getAnisotropicMeshingSmoothness() {
++    return _anisotropicMeshingSmoothness;
++}
++
++void FluidSimulation::setAnisotropicMeshingSmoothness(double s) {
++    _logfile.log(std::ostringstream().flush() << 
++                 _logfile.getTime() << " setAnisotropicMeshingSmoothness: " << s << std::endl);
++
++    _anisotropicMeshingSmoothness = std::min(std::max(s, 0.0), 3.0);
 +}
 +
 +void FluidSimulation::enableGPUWhitewater() {
@@ -1629,7 +1846,7 @@ index 10989a7..be25fb1 100644
  bool FluidSimulation::isAsynchronousMeshingEnabled() {
      return _isAsynchronousMeshingEnabled;
  }
-@@ -2189,6 +2283,136 @@ double FluidSimulation::getDiffuseSprayDragCoefficient() {
+@@ -2189,6 +2312,136 @@ double FluidSimulation::getDiffuseSprayDragCoefficient() {
      return _diffuseMaterial.getSprayDragCoefficient();
  }
  
@@ -1766,7 +1983,7 @@ index 10989a7..be25fb1 100644
  void FluidSimulation::setDiffuseSprayDragCoefficient(double d) {
      _logfile.log(std::ostringstream().flush() << 
                   _logfile.getTime() << " setDiffuseSprayDragCoefficient: " << d << std::endl);
-@@ -4306,6 +4530,10 @@ void FluidSimulation::_initializeParticleSystems() {
+@@ -4306,6 +4559,10 @@ void FluidSimulation::_initializeParticleSystems() {
      if (_isFluidParticleUIDAttributeEnabled) {
          _markerParticles.addAttributeInt("UID", -1);
      }
@@ -1777,7 +1994,7 @@ index 10989a7..be25fb1 100644
  }
  
  void FluidSimulation::_initializeForceFieldGrid(int isize, int jsize, int ksize, double dx) {
-@@ -4493,13 +4721,967 @@ void FluidSimulation::_initializeParticleRadii() {
+@@ -4493,13 +4750,1009 @@ void FluidSimulation::_initializeParticleRadii() {
  }
  
  void FluidSimulation::_initializeRandomGenerator() {
@@ -1900,6 +2117,48 @@ index 10989a7..be25fb1 100644
 +        counts[level]++;
 +    }
 +    return counts;
++}
++
++bool FluidSimulation::hasMarkerParticleLevelData() {
++    return _markerParticles.getAttribute(_adaptiveParticleLevelName).id >= 0;
++}
++
++void FluidSimulation::getMarkerParticleLevelDataRange(size_t start_idx, size_t end_idx, char *data) {
++    if (end_idx > _markerParticles.size() || start_idx > end_idx) {
++        std::string msg = "Error: invalid range.\n";
++        msg += "range: [" + _toString(start_idx) + ", " + _toString(end_idx) + "]\n";
++        throw std::domain_error(msg);
++    }
++    if (!hasMarkerParticleLevelData()) {
++        std::fill(data, data + (end_idx - start_idx), (char)0);
++        return;
++    }
++
++    std::vector<unsigned char> *levels;
++    _markerParticles.getAttributeValues(_adaptiveParticleLevelName, levels);
++    for (size_t i = start_idx; i < end_idx; i++) {
++        data[i - start_idx] = (char)levels->at(i);
++    }
++}
++
++void FluidSimulation::loadMarkerParticleLevelData(size_t size, char *levels) {
++    // In the order of the loaded particles, taken by _loadMarkerParticles
++    // together with each particle, so one dropped there cannot shift the rest
++    unsigned char *values = (unsigned char*)levels;
++    _adaptiveLevelLoadData.insert(_adaptiveLevelLoadData.end(), values, values + size);
++}
++
++double FluidSimulation::getAdaptiveParticleTime() {
++    return _adaptiveParticleTime;
++}
++
++double FluidSimulation::getAdaptiveParticleNextPassTime() {
++    return _adaptiveParticleNextPassTime;
++}
++
++void FluidSimulation::setAdaptiveParticleTimes(double time, double nextPassTime) {
++    _adaptiveParticleTime = time;
++    _adaptiveParticleNextPassTime = nextPassTime;
 +}
 +
 +void FluidSimulation::_initializeAdaptiveParticleAttribute() {
@@ -2748,7 +3007,33 @@ index 10989a7..be25fb1 100644
  void FluidSimulation::_initializeSimulation() {
      _logfile.newline();
      _logfile.log(std::ostringstream().flush() << 
-@@ -5900,7 +7082,20 @@ void FluidSimulation::_updateLiquidLevelSet() {
+@@ -5303,6 +6556,14 @@ void FluidSimulation::_loadMarkerParticles(MarkerParticleLoadData &particleData,
+         _markerParticles.getAttributeValues("UID", uid);
+     }
+ 
++    std::vector<unsigned char> *level = nullptr;
++    size_t levelStart = _adaptiveLevelLoadPosition;
++    if (_adaptiveLevelLoadData.size() >= levelStart + particleData.particles.size()) {
++        _initializeAdaptiveParticleAttribute();
++        _markerParticles.getAttributeValues(_adaptiveParticleLevelName, level);
++        _adaptiveLevelLoadPosition += particleData.particles.size();
++    }
++
+     AABB bounds(0.0, 0.0, 0.0, _isize * _dx, _jsize * _dx, _ksize * _dx);
+     for (size_t i = 0; i < particleData.particles.size(); i++) {
+         MarkerParticle mp = particleData.particles[i];
+@@ -5311,6 +6572,10 @@ void FluidSimulation::_loadMarkerParticles(MarkerParticleLoadData &particleData,
+             positions->push_back(mp.position);
+             velocities->push_back(mp.velocity);
+ 
++            if (level != nullptr) {
++                level->push_back(_adaptiveLevelLoadData[levelStart + i]);
++            }
++
+             if (loadAffineData) {
+                 MarkerParticleAffine ap = affineData.particles[i];
+                 affineX->push_back(ap.affineX);
+@@ -5900,7 +7165,20 @@ void FluidSimulation::_updateLiquidLevelSet() {
              radius = _liquidSDFSurfaceTensionParticleScale * _liquidSDFParticleRadius;
          }
  
@@ -2770,7 +3055,7 @@ index 10989a7..be25fb1 100644
  
      }
  
-@@ -5947,14 +7142,24 @@ _logfile.logString(_logfile.getTime() + " BEGIN       Advect Velocity Field");
+@@ -5947,14 +7225,24 @@ _logfile.logString(_logfile.getTime() + " BEGIN       Advect Velocity Field");
          params.validVelocities = &_validVelocities;
          params.particleRadius = radius;
  
@@ -2796,7 +3081,7 @@ index 10989a7..be25fb1 100644
          _extrapolateFluidVelocities(_MACVelocity, _validVelocities);
      }
  
-@@ -6023,6 +7228,7 @@ void FluidSimulation::_calculateFluidCurvatureGridThread() {
+@@ -6023,6 +7311,7 @@ void FluidSimulation::_calculateFluidCurvatureGridThread() {
              _fluidCurvatureGrid = Array3d<float>(_isize, _jsize, _ksize, 0.0f);
          }
  
@@ -2804,7 +3089,7 @@ index 10989a7..be25fb1 100644
          _liquidSDF.calculateCurvatureGrid(_fluidSurfaceLevelSet, _fluidCurvatureGrid);
  
      }
-@@ -6272,6 +7478,8 @@ void FluidSimulation::_applyBodyForcesToVelocityField(double dt) {
+@@ -6272,6 +7561,8 @@ void FluidSimulation::_applyBodyForcesToVelocityField(double dt) {
              _applyConstantBodyForces(ex, dt);
          }
  
@@ -2813,7 +3098,7 @@ index 10989a7..be25fb1 100644
      }
  
      t.stop();
-@@ -6483,6 +7691,7 @@ void FluidSimulation::_pressureSolve(double dt) {
+@@ -6483,6 +7774,7 @@ void FluidSimulation::_pressureSolve(double dt) {
              params.tolerance = _pressureSolveTolerance;
              params.acceptableTolerance = _pressureSolveAcceptableTolerance;
              params.maxIterations = _maxPressureSolveIterations;
@@ -2821,7 +3106,7 @@ index 10989a7..be25fb1 100644
  
              MACVelocityField vfieldLevel1 = _MACVelocity.generateCoarseGrid();
              MACVelocityField vfieldSolidLevel1 = _solidSDF.getVelocityDataGrid()->field.generateCoarseGrid();
-@@ -6531,6 +7740,7 @@ void FluidSimulation::_pressureSolve(double dt) {
+@@ -6531,6 +7823,7 @@ void FluidSimulation::_pressureSolve(double dt) {
          params.tolerance = _pressureSolveTolerance;
          params.acceptableTolerance = _pressureSolveAcceptableTolerance;
          params.maxIterations = _maxPressureSolveIterations;
@@ -2829,7 +3114,7 @@ index 10989a7..be25fb1 100644
  
          params.velocityFieldFluid = &_MACVelocity;
          params.velocityFieldSolid = &(_solidSDF.getVelocityDataGrid()->field);
-@@ -7599,8 +8809,13 @@ void FluidSimulation::_updateMarkerParticleSourceIDAttributeGrid(ParticleSystem
+@@ -7599,8 +8892,13 @@ void FluidSimulation::_updateMarkerParticleSourceIDAttributeGrid(ParticleSystem
          indices[i] = i;
      }
  
@@ -2845,7 +3130,7 @@ index 10989a7..be25fb1 100644
      std::shuffle(indices.begin(), indices.end(), g);
      
      std::vector<vmath::vec3> positionsRandom(indices.size());
-@@ -8993,6 +10208,8 @@ void FluidSimulation::_updateInflowMeshFluidSources() {
+@@ -8993,6 +10291,8 @@ void FluidSimulation::_updateInflowMeshFluidSources() {
          maskgrid.addParticle(positions->at(i));
      }
  
@@ -2854,7 +3139,7 @@ index 10989a7..be25fb1 100644
      for (size_t i = 0; i < _meshFluidSources.size(); i++) {
          if (_meshFluidSources[i]->isInflow()) {
              _updateInflowMeshFluidSource(_meshFluidSources[i], maskgrid);
-@@ -9078,6 +10295,7 @@ void FluidSimulation::_updateAddedFluidMeshObjectQueue() {
+@@ -9078,6 +10378,7 @@ void FluidSimulation::_updateAddedFluidMeshObjectQueue() {
      for (unsigned int i = 0; i < positions->size(); i++) {
          maskgrid.addParticle(positions->at(i));
      }
@@ -2862,10 +3147,17 @@ index 10989a7..be25fb1 100644
  
      MeshLevelSet meshSDF(_isize, _jsize, _ksize, _dx);
      meshSDF.disableVelocityData();
-@@ -9269,10 +10487,57 @@ std::string FluidSimulation::_getFrameString(int number) {
+@@ -9269,10 +10570,64 @@ std::string FluidSimulation::_getFrameString(int number) {
  }
  
  void FluidSimulation::_smoothSurfaceMesh(TriangleMesh &mesh) {
++    // HydroKit: the anisotropic surface is smoothed without shrinking
++    // (prototype v6: Taubin 0.5 / -0.53, 20 rounds; the mesh keeps the
++    // calibrated volume within 0.5 %)
++    if (_isAnisotropicMeshingEnabled) {
++        mesh.smoothTaubin(0.5, -0.53, 20);
++        return;
++    }
 +    // HydroKit: with the surface mesh on the GPU, the smoothing there too
 +    if (_isGPUSurfaceMeshingEnabled && _smoothSurfaceMeshGPU(mesh)) {
 +        return;
@@ -2920,7 +3212,7 @@ index 10989a7..be25fb1 100644
  void FluidSimulation::_invertContactNormals(TriangleMesh &mesh) {
      if (!_isInvertedContactNormalsEnabled) {
          return;
-@@ -9429,10 +10694,23 @@ void FluidSimulation::_computeDomainBoundarySDF(MeshLevelSet *sdf) {
+@@ -9429,10 +10784,23 @@ void FluidSimulation::_computeDomainBoundarySDF(MeshLevelSet *sdf) {
  
  void FluidSimulation::_generateOutputSurface(TriangleMesh &surface, TriangleMesh &preview,
                                                 std::vector<vmath::vec3> *particles,
@@ -2945,16 +3237,26 @@ index 10989a7..be25fb1 100644
  
      if (_markerParticles.empty()) {
          surface = TriangleMesh();
-@@ -9480,6 +10758,8 @@ void FluidSimulation::_generateOutputSurface(TriangleMesh &surface, TriangleMesh
+@@ -9480,9 +10848,18 @@ void FluidSimulation::_generateOutputSurface(TriangleMesh &surface, TriangleMesh
      if (_isPreviewSurfaceMeshEnabled) {
          params.previewdx = _previewdx;
      }
 +    params.useGPU = _isGPUSurfaceMeshingEnabled;
 +    params.interiorCells = interiorCells;
++    params.anisotropic = _isAnisotropicMeshingEnabled;
++    params.anisotropicSmoothing = _anisotropicMeshingSmoothness;
  
      ParticleMesher mesher;
      surface = mesher.meshParticles(params);
-@@ -9938,11 +11218,13 @@ void FluidSimulation::_generateSurfaceDensityAttributeData(TriangleMesh &surface
++    if (_isAnisotropicMeshingEnabled) {
++        _logfile.log(std::ostringstream().flush() << 
++                     _logfile.getTime() << " Anisotropic surface threshold: " <<
++                     mesher.getAnisotropicThreshold() << std::endl);
++    }
+     if (_isPreviewSurfaceMeshEnabled) {
+         preview = mesher.getPreviewMesh();
+     }
+@@ -9938,11 +11315,13 @@ void FluidSimulation::_generateSurfaceDensityAttributeData(TriangleMesh &surface
  }
  
  void FluidSimulation::_outputSurfaceMeshThread(std::vector<vmath::vec3> *particles,
@@ -2972,7 +3274,7 @@ index 10989a7..be25fb1 100644
      }
  
      _logfile.logString(_logfile.getTime() + " BEGIN       Generate Surface Mesh");
-@@ -9956,9 +11238,10 @@ void FluidSimulation::_outputSurfaceMeshThread(std::vector<vmath::vec3> *particl
+@@ -9956,9 +11335,10 @@ void FluidSimulation::_outputSurfaceMeshThread(std::vector<vmath::vec3> *particl
      }
  
      TriangleMesh surfacemesh, previewmesh;
@@ -2984,7 +3286,7 @@ index 10989a7..be25fb1 100644
  
      _generateSurfaceMotionBlurData(surfacemesh, vfield);
      _generateSurfaceVelocityAttributeData(surfacemesh, vfield);
-@@ -10021,9 +11304,18 @@ void FluidSimulation::_launchOutputSurfaceMeshThread() {
+@@ -10021,9 +11401,18 @@ void FluidSimulation::_launchOutputSurfaceMeshThread() {
  
      // Particles will be deleted within the thread after use
      std::vector<vmath::vec3> *particles = new std::vector<vmath::vec3>();
@@ -3006,7 +3308,7 @@ index 10989a7..be25fb1 100644
      }
  
      // solidSDF will be deleted within the thread after use
-@@ -10048,14 +11340,23 @@ void FluidSimulation::_launchOutputSurfaceMeshThread() {
+@@ -10048,14 +11437,23 @@ void FluidSimulation::_launchOutputSurfaceMeshThread() {
          std::vector<int> *ids = nullptr;
          _markerParticles.getAttributeValues("SOURCEID", ids);
  
@@ -3031,7 +3333,7 @@ index 10989a7..be25fb1 100644
  
      if (!_isAsynchronousMeshingEnabled && _mesherThread.joinable()) {
          _mesherThread.join();
-@@ -10872,6 +12173,7 @@ void FluidSimulation::_stepFluid(double dt) {
+@@ -10872,6 +12270,7 @@ void FluidSimulation::_stepFluid(double dt) {
          _deleteSavedVelocityField();
          _advanceMarkerParticles(dt);
          _updateFluidObjects();
@@ -3040,10 +3342,10 @@ index 10989a7..be25fb1 100644
          _outputSimulationData();
      }
 diff --git a/src/engine/fluidsimulation.h b/src/engine/fluidsimulation.h
-index 46f70b5..75598b0 100644
+index 46f70b5..cbb9767 100644
 --- a/src/engine/fluidsimulation.h
 +++ b/src/engine/fluidsimulation.h
-@@ -492,6 +492,54 @@ public:
+@@ -492,6 +492,62 @@ public:
      void disableAsynchronousMeshing();
      bool isAsynchronousMeshingEnabled();
  
@@ -3055,6 +3357,14 @@ index 46f70b5..75598b0 100644
 +    void enableGPUSurfaceMeshing();
 +    void disableGPUSurfaceMeshing();
 +    bool isGPUSurfaceMeshingEnabled();
++
++    // HydroKit: water surface from anisotropic kernels (hkaniso.h); the
++    // smoothness is the field's Gaussian smoothing in cells
++    void enableAnisotropicMeshing();
++    void disableAnisotropicMeshing();
++    bool isAnisotropicMeshingEnabled();
++    double getAnisotropicMeshingSmoothness();
++    void setAnisotropicMeshingSmoothness(double s);
 +
 +    /*
 +        HydroKit: the whitewater step on the GPU — so far the surface
@@ -3098,7 +3408,7 @@ index 46f70b5..75598b0 100644
      /*
          Enable/disable the simulation from saving preview triangle 
          meshes to disk.
-@@ -1021,6 +1069,27 @@ public:
+@@ -1021,6 +1077,27 @@ public:
      double getDiffuseSprayDragCoefficient();
      void setDiffuseSprayDragCoefficient(double d);
  
@@ -3126,7 +3436,7 @@ index 46f70b5..75598b0 100644
      /*
          Scaling factor for spray velocity during emission
      */
-@@ -1099,6 +1168,43 @@ public:
+@@ -1099,6 +1176,43 @@ public:
      int getMaxThreadCount();
      void setMaxThreadCount(int n);
  
@@ -3170,7 +3480,21 @@ index 46f70b5..75598b0 100644
      /*
          Add a constant force such as gravity to the simulation.
      */
-@@ -1802,6 +1908,24 @@ private:
+@@ -1557,6 +1671,13 @@ public:
+     void loadMarkerParticleViscosityData(FluidSimulationMarkerParticleViscosityData data);
+     void loadMarkerParticleDensityData(FluidSimulationMarkerParticleDensityData data);
+     void loadMarkerParticleIDData(FluidSimulationMarkerParticleIDData data);
++    // HydroKit: resuming a bake with adaptive particle sizes
++    bool hasMarkerParticleLevelData();
++    void getMarkerParticleLevelDataRange(size_t start_idx, size_t end_idx, char *data);
++    void loadMarkerParticleLevelData(size_t size, char *levels);
++    double getAdaptiveParticleTime();
++    double getAdaptiveParticleNextPassTime();
++    void setAdaptiveParticleTimes(double time, double nextPassTime);
+     void loadDiffuseParticleData(FluidSimulationDiffuseParticleData data);
+ 
+ private:   
+@@ -1802,6 +1923,24 @@ private:
      void _initializeSimulation();
      void _initializeParticleRadii();
      void _initializeRandomGenerator();
@@ -3195,7 +3519,7 @@ index 46f70b5..75598b0 100644
      double _getMarkerParticleJitter();
      vmath::vec3 _jitterMarkerParticlePosition(vmath::vec3 p, double jitter);
      void _addMarkerParticles(std::vector<MarkerParticle> &particles, MarkerParticleAttributes attributes);
-@@ -2074,7 +2198,8 @@ private:
+@@ -2074,7 +2213,8 @@ private:
      void _outputSurfaceMeshThread(std::vector<vmath::vec3> *particles,
                                    MeshLevelSet *solidSDF,
                                    MACVelocityField *vfield,
@@ -3205,7 +3529,7 @@ index 46f70b5..75598b0 100644
      void _updateMeshingVolumeSDF();
      void _applyMeshingVolumeToSDF(MeshLevelSet *sdf);
      void _filterParticlesOutsideMeshingVolume(std::vector<vmath::vec3> *particles);
-@@ -2142,12 +2267,14 @@ private:
+@@ -2142,12 +2282,14 @@ private:
                                          std::vector<float> &binSpeeds, 
                                          std::vector<char> &outdata);
      void _smoothSurfaceMesh(TriangleMesh &mesh);
@@ -3221,7 +3545,7 @@ index 46f70b5..75598b0 100644
      void _outputSimulationLogFile();
  
  
-@@ -2290,6 +2417,11 @@ private:
+@@ -2290,6 +2432,11 @@ private:
      bool _isPrecomputedSolidLevelSetUpToDate = false;
      int _solidLevelSetExactBand = 3;
      bool _isSmoothSurfaceTensionKernelEnabled = false;
@@ -3233,11 +3557,13 @@ index 46f70b5..75598b0 100644
      double _liquidSDFParticleScale = 1.0;
      double _liquidSDFParticleRadius = 0.0;
      double _liquidSDFSurfaceTensionParticleScale = 2.0;
-@@ -2392,6 +2524,11 @@ private:
+@@ -2392,6 +2539,13 @@ private:
      bool _isMeshingVolumeLevelSetUpToDate = false;
  
      bool _isAsynchronousMeshingEnabled = true;
 +    bool _isGPUSurfaceMeshingEnabled = false;
++    bool _isAnisotropicMeshingEnabled = false;
++    double _anisotropicMeshingSmoothness = 0.5;
 +    bool _isGPUWhitewaterEnabled = false;
 +    bool _isGPUWaterParticlesEnabled = false;
 +    bool _isGPUAdvectionEnabled = false;
@@ -3245,7 +3571,7 @@ index 46f70b5..75598b0 100644
      std::thread _mesherThread;
  
      // Advect velocity field
-@@ -2532,6 +2669,22 @@ private:
+@@ -2532,6 +2686,24 @@ private:
  
      std::random_device _randomDevice;
      std::mt19937 _randomSeed;
@@ -3265,9 +3591,517 @@ index 46f70b5..75598b0 100644
 +    int _adaptiveParticleLastMerges = 0;
 +    int _adaptiveParticleLastSplits = 0;
 +    std::string _adaptiveParticleLevelName = "HKLEVEL";
++    std::vector<unsigned char> _adaptiveLevelLoadData;
++    size_t _adaptiveLevelLoadPosition = 0;
      std::uniform_real_distribution<> _random;
  
  };
+diff --git a/src/engine/hkaniso.cpp b/src/engine/hkaniso.cpp
+new file mode 100644
+index 0000000..f55e4d2
+--- /dev/null
++++ b/src/engine/hkaniso.cpp
+@@ -0,0 +1,439 @@
++/*
++HydroKit: anisotropic kernels for the water surface (see hkaniso.h).
++*/
++
++#include "hkaniso.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <thread>
++
++#include "threadutils.h"
++
++namespace {
++
++const double PI = 3.14159265358979323846;
++const double NORM = 315.0 / (64.0 * PI);   // poly6 kernel
++const int N_EPS = 25;                       // Yu & Turk: fewer neighbours stay isotropic
++const double K_R = 4.0;                     // Yu & Turk: at most 4 : 1 stretch
++// Neighbourhood for density and covariance, in dx: a falling sheet one particle
++// thick still has more than N_EPS neighbours (prototype R_NACHBAR)
++const double NEIGHBOUR_RADIUS = 1.5;
++
++struct NeighbourGrid {
++    double cellsize = 1.0;
++    std::vector<int64_t> keys;   // sorted cell keys
++    std::vector<int> order;      // particle index for each key
++};
++
++inline int64_t cellKey(int64_t i, int64_t j, int64_t k) {
++    const int64_t off = (int64_t)1 << 20;
++    i = std::min(std::max(i + off, (int64_t)0), 2 * off - 1);
++    j = std::min(std::max(j + off, (int64_t)0), 2 * off - 1);
++    k = std::min(std::max(k + off, (int64_t)0), 2 * off - 1);
++    return (i << 42) | (j << 21) | k;
++}
++
++template <class F>
++void forNeighbours(const NeighbourGrid &grid, const std::vector<vmath::vec3> &P,
++                   size_t idx, double radius, F &fn) {
++    vmath::vec3 p = P[idx];
++    int64_t ci = (int64_t)floor(p.x / grid.cellsize);
++    int64_t cj = (int64_t)floor(p.y / grid.cellsize);
++    int64_t ck = (int64_t)floor(p.z / grid.cellsize);
++    double r2 = radius * radius;
++    for (int dk = -1; dk <= 1; dk++) {
++        for (int dj = -1; dj <= 1; dj++) {
++            for (int di = -1; di <= 1; di++) {
++                int64_t key = cellKey(ci + di, cj + dj, ck + dk);
++                size_t s = std::lower_bound(grid.keys.begin(), grid.keys.end(), key) - grid.keys.begin();
++                for (; s < grid.keys.size() && grid.keys[s] == key; s++) {
++                    int j = grid.order[s];
++                    vmath::vec3 rel = P[j] - p;
++                    double d2 = (double)rel.x * rel.x + (double)rel.y * rel.y + (double)rel.z * rel.z;
++                    if (d2 < r2) {
++                        fn(j, rel, sqrt(d2));
++                    }
++                }
++            }
++        }
++    }
++}
++
++template <class F>
++void parallelFor(size_t n, F fn) {
++    int numthreads = std::max(1, std::min(ThreadUtils::getMaxThreadCount(), (int)((n + 255) / 256)));
++    size_t chunk = (n + numthreads - 1) / numthreads;
++    std::vector<std::thread> threads;
++    for (int t = 0; t < numthreads; t++) {
++        size_t start = t * chunk;
++        size_t end = std::min(n, start + chunk);
++        if (start >= end) {
++            break;
++        }
++        threads.emplace_back(fn, start, end);
++    }
++    for (size_t t = 0; t < threads.size(); t++) {
++        threads[t].join();
++    }
++}
++
++// Eigen decomposition of a symmetric 3x3 matrix (cyclic Jacobi). Eigenvectors
++// are the columns of v, sorted by descending eigenvalue.
++void eigenSymmetric3(double a[3][3], double w[3], double v[3][3]) {
++    for (int i = 0; i < 3; i++) {
++        for (int j = 0; j < 3; j++) {
++            v[i][j] = i == j ? 1.0 : 0.0;
++        }
++    }
++    for (int sweep = 0; sweep < 50; sweep++) {
++        double off = a[0][1] * a[0][1] + a[0][2] * a[0][2] + a[1][2] * a[1][2];
++        double diag = a[0][0] * a[0][0] + a[1][1] * a[1][1] + a[2][2] * a[2][2];
++        if (off <= 1e-24 * diag || off == 0.0) {
++            break;
++        }
++        for (int p = 0; p < 2; p++) {
++            for (int q = p + 1; q < 3; q++) {
++                if (a[p][q] == 0.0) {
++                    continue;
++                }
++                double theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
++                double t = (theta >= 0.0 ? 1.0 : -1.0) / (fabs(theta) + sqrt(theta * theta + 1.0));
++                double c = 1.0 / sqrt(t * t + 1.0);
++                double s = t * c;
++                for (int k = 0; k < 3; k++) {
++                    double akp = a[k][p], akq = a[k][q];
++                    a[k][p] = c * akp - s * akq;
++                    a[k][q] = s * akp + c * akq;
++                }
++                for (int k = 0; k < 3; k++) {
++                    double apk = a[p][k], aqk = a[q][k];
++                    a[p][k] = c * apk - s * aqk;
++                    a[q][k] = s * apk + c * aqk;
++                }
++                for (int k = 0; k < 3; k++) {
++                    double vkp = v[k][p], vkq = v[k][q];
++                    v[k][p] = c * vkp - s * vkq;
++                    v[k][q] = s * vkp + c * vkq;
++                }
++            }
++        }
++    }
++
++    int order[3] = {0, 1, 2};
++    std::sort(order, order + 3, [&](int x, int y) { return a[x][x] > a[y][y]; });
++    double vs[3][3];
++    for (int k = 0; k < 3; k++) {
++        w[k] = a[order[k]][order[k]];
++        for (int r = 0; r < 3; r++) {
++            vs[r][k] = v[r][order[k]];
++        }
++    }
++    for (int r = 0; r < 3; r++) {
++        for (int k = 0; k < 3; k++) {
++            v[r][k] = vs[r][k];
++        }
++    }
++}
++
++}
++
++void HKAniso::prepare(std::vector<vmath::vec3> *particles, Parameters params) {
++    _params = params;
++    size_t n = particles->size();
++    _h = params.kernelRadius * params.dx;
++    _centres.assign(n, vmath::vec3());
++    _G.assign(6 * n, 0.0f);
++    _weights.assign(n, 0.0f);
++    _reaches.assign(n, 0.0f);
++    _reach = 0.0;
++    if (n == 0) {
++        return;
++    }
++
++    const std::vector<vmath::vec3> &P = *particles;
++    double R = NEIGHBOUR_RADIUS * params.dx;
++    double h = _h;
++
++    NeighbourGrid grid;
++    grid.cellsize = R;
++    std::vector<int64_t> keys(n);
++    grid.order.resize(n);
++    for (size_t i = 0; i < n; i++) {
++        keys[i] = cellKey((int64_t)floor(P[i].x / R), (int64_t)floor(P[i].y / R), (int64_t)floor(P[i].z / R));
++        grid.order[i] = (int)i;
++    }
++    std::sort(grid.order.begin(), grid.order.end(), [&](int x, int y) {
++        return keys[x] < keys[y] || (keys[x] == keys[y] && x < y);
++    });
++    grid.keys.resize(n);
++    for (size_t s = 0; s < n; s++) {
++        grid.keys[s] = keys[grid.order[s]];
++    }
++    keys.clear();
++    keys.shrink_to_fit();
++
++    // Density (poly6 over R), weighted mean and covariance of the neighbours
++    // (Yu & Turk: w = 1 - (d / r)^3); the particle itself counts as a neighbour
++    std::vector<float> density(n);
++    std::vector<int> count(n);
++    std::vector<vmath::vec3> mean(n);
++    std::vector<float> cov(6 * n);
++    parallelFor(n, [&](size_t start, size_t end) {
++        for (size_t i = start; i < end; i++) {
++            double dens = 0.0, sw = 0.0;
++            int nz = 0;
++            double sx[3] = {0.0, 0.0, 0.0};
++            double sxx[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
++            auto fn = [&](int, vmath::vec3 rel, double d) {
++                double q = d / R;
++                double a = 1.0 - q * q;
++                dens += NORM / (R * R * R) * a * a * a;
++                double w = 1.0 - q * q * q;
++                double r[3] = {rel.x, rel.y, rel.z};
++                sw += w;
++                nz++;
++                for (int c = 0; c < 3; c++) {
++                    sx[c] += w * r[c];
++                }
++                sxx[0] += w * r[0] * r[0];
++                sxx[1] += w * r[0] * r[1];
++                sxx[2] += w * r[0] * r[2];
++                sxx[3] += w * r[1] * r[1];
++                sxx[4] += w * r[1] * r[2];
++                sxx[5] += w * r[2] * r[2];
++            };
++            forNeighbours(grid, P, i, R, fn);
++            double m[3] = {sx[0] / sw, sx[1] / sw, sx[2] / sw};
++            density[i] = (float)dens;
++            count[i] = nz;
++            mean[i] = vmath::vec3(m[0], m[1], m[2]);
++            float *c = &cov[6 * i];
++            c[0] = (float)(sxx[0] / sw - m[0] * m[0]);
++            c[1] = (float)(sxx[1] / sw - m[0] * m[1]);
++            c[2] = (float)(sxx[2] / sw - m[0] * m[2]);
++            c[3] = (float)(sxx[3] / sw - m[1] * m[1]);
++            c[4] = (float)(sxx[4] / sw - m[1] * m[2]);
++            c[5] = (float)(sxx[5] / sw - m[2] * m[2]);
++        }
++    });
++
++    std::vector<int> sortedCount = count;
++    std::nth_element(sortedCount.begin(), sortedCount.begin() + n / 2, sortedCount.end());
++    double medianCount = sortedCount[n / 2];
++    sortedCount.clear();
++    sortedCount.shrink_to_fit();
++
++    double lambda = params.lambda;
++    parallelFor(n, [&](size_t start, size_t end) {
++        for (size_t i = start; i < end; i++) {
++            // Particle volume 1 / density, the density of the densest particle
++            // around: a surface particle sees only half its neighbours and would
++            // swell the surface; a compressed pool (measured up to 1.7 x the
++            // nominal 8 per cell) no longer pushes the field far above 1
++            float dmax = density[i];
++            auto fn = [&](int j, vmath::vec3, double) {
++                dmax = std::max(dmax, density[j]);
++            };
++            forNeighbours(grid, P, i, R, fn);
++            double volume = 1.0 / std::max((double)dmax, 1e-12);
++
++            vmath::vec3 mu = mean[i];
++            _centres[i] = P[i] + (float)lambda * mu;
++
++            // Anisotropic only at the surface (neighbourhood off-centre) and in
++            // thin sheets (few neighbours): inside, FLIP particles sit in layers,
++            // and flat kernels along them striped the field (prototype: interior
++            // density 2.5 instead of about 1)
++            double mulen = sqrt((double)mu.x * mu.x + (double)mu.y * mu.y + (double)mu.z * mu.z);
++            bool edge = mulen > 0.2 * R || count[i] < 0.6 * medianCount;
++            double sig[3] = {1.0, 1.0, 1.0};
++            double V[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
++            if (count[i] >= N_EPS && edge) {
++                const float *c = &cov[6 * i];
++                double A[3][3] = {{c[0], c[1], c[2]}, {c[1], c[3], c[4]}, {c[2], c[4], c[5]}};
++                double w[3];
++                eigenSymmetric3(A, w, V);
++                double s1 = std::max(w[0], 1e-12);
++                for (int k = 0; k < 3; k++) {
++                    sig[k] = std::max(w[k], s1 / K_R);
++                }
++                // same kernel volume as the sphere
++                double norm = cbrt(sig[0] * sig[1] * sig[2]);
++                for (int k = 0; k < 3; k++) {
++                    sig[k] /= norm;
++                }
++            }
++
++            // G = (1 / h) V diag(1 / sigma) V^T
++            const int idx[6][2] = {{0, 0}, {0, 1}, {0, 2}, {1, 1}, {1, 2}, {2, 2}};
++            float *g = &_G[6 * i];
++            for (int m = 0; m < 6; m++) {
++                int a = idx[m][0], b = idx[m][1];
++                double sum = 0.0;
++                for (int k = 0; k < 3; k++) {
++                    sum += V[a][k] * V[b][k] / sig[k];
++                }
++                g[m] = (float)(sum / h);
++            }
++            _weights[i] = (float)(NORM / (h * h * h) * volume);
++            _reaches[i] = (float)(h * std::max(sig[0], std::max(sig[1], sig[2])));
++        }
++    });
++
++    for (size_t i = 0; i < n; i++) {
++        vmath::vec3 shift = _centres[i] - P[i];
++        double s = sqrt((double)shift.x * shift.x + (double)shift.y * shift.y + (double)shift.z * shift.z);
++        _reach = std::max(_reach, s + _reaches[i]);
++    }
++    // the Gaussian smoothing reaches 3 sigma further, plus one node
++    _reach += 3.0 * params.blur * params.dx + params.dx;
++}
++
++void HKAniso::computeField(vmath::vec3 offset, int isize, int jsize, int ksize,
++                           double nodedx, std::vector<float> &field) {
++    double sigma = _params.blur * _params.dx / nodedx;
++    int r = sigma > 1e-6 ? (int)ceil(3.0 * sigma) : 0;
++    int pi = isize + 2 * r;
++    int pj = jsize + 2 * r;
++    int pk = ksize + 2 * r;
++    vmath::vec3 poffset = offset - vmath::vec3(r * nodedx, r * nodedx, r * nodedx);
++
++    field.assign((size_t)isize * jsize * ksize, 0.0f);
++    std::vector<float> padded((size_t)pi * pj * pk, 0.0f);
++
++    double maxx = poffset.x + (pi - 1) * nodedx;
++    double maxy = poffset.y + (pj - 1) * nodedx;
++    double maxz = poffset.z + (pk - 1) * nodedx;
++    std::vector<int> candidates;
++    for (size_t i = 0; i < _centres.size(); i++) {
++        vmath::vec3 c = _centres[i];
++        double rr = _reaches[i];
++        if (c.x + rr < poffset.x || c.x - rr > maxx ||
++            c.y + rr < poffset.y || c.y - rr > maxy ||
++            c.z + rr < poffset.z || c.z - rr > maxz) {
++            continue;
++        }
++        candidates.push_back((int)i);
++    }
++    if (candidates.empty()) {
++        return;
++    }
++
++    // Each thread owns a slab of node layers: every node sums its particles in
++    // index order, so neighbouring compute chunks agree bit for bit at seams
++    int numthreads = std::max(1, std::min(ThreadUtils::getMaxThreadCount(), pk));
++    int slab = (pk + numthreads - 1) / numthreads;
++    std::vector<std::thread> threads;
++    for (int t = 0; t < numthreads; t++) {
++        int k0 = t * slab;
++        int k1 = std::min(pk, k0 + slab);
++        if (k0 >= k1) {
++            break;
++        }
++        threads.emplace_back(&HKAniso::_splatSlab, this, poffset, pi, pj, k0, k1, nodedx,
++                             &candidates, &padded);
++    }
++    for (size_t t = 0; t < threads.size(); t++) {
++        threads[t].join();
++    }
++
++    if (r > 0) {
++        std::vector<float> weights(2 * r + 1);
++        double sum = 0.0;
++        for (int x = -r; x <= r; x++) {
++            weights[x + r] = (float)exp(-0.5 * (x / sigma) * (x / sigma));
++            sum += weights[x + r];
++        }
++        for (size_t x = 0; x < weights.size(); x++) {
++            weights[x] = (float)(weights[x] / sum);
++        }
++        std::vector<float> tmp(padded.size());
++        _blurAxis(padded, tmp, pi, pj, pk, 0, weights);
++        _blurAxis(tmp, padded, pi, pj, pk, 1, weights);
++        _blurAxis(padded, tmp, pi, pj, pk, 2, weights);
++        padded.swap(tmp);
++    }
++
++    for (int k = 0; k < ksize; k++) {
++        for (int j = 0; j < jsize; j++) {
++            for (int i = 0; i < isize; i++) {
++                field[(size_t)i + (size_t)isize * ((size_t)j + (size_t)jsize * k)] =
++                    padded[(size_t)(i + r) + (size_t)pi * ((size_t)(j + r) + (size_t)pj * (k + r))];
++            }
++        }
++    }
++}
++
++void HKAniso::_splatSlab(vmath::vec3 offset, int pi, int pj, int k0, int k1, double nodedx,
++                         std::vector<int> *candidates, std::vector<float> *field) {
++    float *F = field->data();
++    double inv = 1.0 / nodedx;
++    for (size_t n = 0; n < candidates->size(); n++) {
++        int idx = candidates->at(n);
++        vmath::vec3 c = _centres[idx];
++        double rr = _reaches[idx];
++        int kmin = std::max(k0, (int)ceil((c.z - rr - offset.z) * inv));
++        int kmax = std::min(k1 - 1, (int)floor((c.z + rr - offset.z) * inv));
++        int jmin = std::max(0, (int)ceil((c.y - rr - offset.y) * inv));
++        int jmax = std::min(pj - 1, (int)floor((c.y + rr - offset.y) * inv));
++        int imin = std::max(0, (int)ceil((c.x - rr - offset.x) * inv));
++        int imax = std::min(pi - 1, (int)floor((c.x + rr - offset.x) * inv));
++        if (kmin > kmax || jmin > jmax || imin > imax) {
++            continue;
++        }
++
++        const float *g = &_G[6 * idx];
++        double w = _weights[idx];
++        for (int k = kmin; k <= kmax; k++) {
++            double rz = offset.z + k * nodedx - c.z;
++            for (int j = jmin; j <= jmax; j++) {
++                double ry = offset.y + j * nodedx - c.y;
++                double ux0 = g[1] * ry + g[2] * rz;
++                double uy0 = g[3] * ry + g[4] * rz;
++                double uz0 = g[4] * ry + g[5] * rz;
++                size_t row = (size_t)pi * ((size_t)j + (size_t)pj * k);
++                for (int i = imin; i <= imax; i++) {
++                    double rx = offset.x + i * nodedx - c.x;
++                    double ux = g[0] * rx + ux0;
++                    double uy = g[1] * rx + uy0;
++                    double uz = g[2] * rx + uz0;
++                    double q = ux * ux + uy * uy + uz * uz;
++                    if (q < 1.0) {
++                        double a = 1.0 - q;
++                        F[row + i] += (float)(w * a * a * a);
++                    }
++                }
++            }
++        }
++    }
++}
++
++void HKAniso::_blurAxis(std::vector<float> &src, std::vector<float> &dst,
++                        int pi, int pj, int pk, int axis, std::vector<float> &weights) {
++    int r = ((int)weights.size() - 1) / 2;
++    int dims[3] = {pi, pj, pk};
++    size_t strides[3] = {1, (size_t)pi, (size_t)pi * pj};
++    int len = dims[axis];
++    int a1 = (axis + 1) % 3;
++    int a2 = (axis + 2) % 3;
++    int n1 = dims[a1];
++    int n2 = dims[a2];
++    parallelFor((size_t)n2, [&](size_t start, size_t end) {
++        for (size_t u2 = start; u2 < end; u2++) {
++            for (int u1 = 0; u1 < n1; u1++) {
++                size_t base = (size_t)u1 * strides[a1] + u2 * strides[a2];
++                for (int x = 0; x < len; x++) {
++                    int t0 = std::max(0, r - x);
++                    int t1 = std::min(2 * r, r + len - 1 - x);
++                    float sum = 0.0f;
++                    for (int t = t0; t <= t1; t++) {
++                        sum += weights[t] * src[base + (size_t)(x + t - r) * strides[axis]];
++                    }
++                    dst[base + (size_t)x * strides[axis]] = sum;
++                }
++            }
++        }
++    });
++}
+diff --git a/src/engine/hkaniso.h b/src/engine/hkaniso.h
+new file mode 100644
+index 0000000..0e480fb
+--- /dev/null
++++ b/src/engine/hkaniso.h
+@@ -0,0 +1,55 @@
++/*
++HydroKit: the water surface from anisotropic kernels (Yu & Turk, "Reconstructing
++Surfaces of Particle-Based Fluids Using Anisotropic Kernels", SCA 2010 / ACM TOG
++32(1) 2013). Measured against the engine's union of spheres in the prototype
++~/hk_testlauf/netz/proto/proto.py (variant v6, 20.11.2026): the spheres add 19 %
++to the water (+52 % on a test block) and look like gel; the paper's kernels alone
++lose 23-30 % and break a pool into "crushed ice". This class adds what fixed it:
++a light Gaussian smoothing of the field and a surface threshold chosen so the
++mesh holds exactly the particles' volume (dx^3 / 8 each) — the threshold itself
++is found by ParticleMesher over all compute chunks.
++*/
++
++#ifndef HKANISO_H
++#define HKANISO_H
++
++#include <vector>
++
++#include "vmath.h"
++
++class HKAniso {
++public:
++    struct Parameters {
++        double dx = 0.0;           // simulation cell size
++        double kernelRadius = 1.2; // kernel radius h, in dx (prototype v4/v6)
++        double lambda = 0.5;       // shift of each kernel towards its neighbours' mean
++        double blur = 0.5;         // Gaussian smoothing of the field, sigma in dx
++    };
++
++    void prepare(std::vector<vmath::vec3> *particles, Parameters params);
++
++    // How far beyond a particle its smoothed field can reach (world units)
++    double getReach() { return _reach; }
++    size_t size() { return _centres.size(); }
++
++    // The smoothed field on isize x jsize x ksize nodes spaced nodedx apart,
++    // node (0, 0, 0) at offset; inside the water it is about 1, outside 0
++    void computeField(vmath::vec3 offset, int isize, int jsize, int ksize,
++                      double nodedx, std::vector<float> &field);
++
++private:
++    void _splatSlab(vmath::vec3 offset, int pi, int pj, int k0, int k1, double nodedx,
++                    std::vector<int> *candidates, std::vector<float> *field);
++    void _blurAxis(std::vector<float> &src, std::vector<float> &dst,
++                   int pi, int pj, int pk, int axis, std::vector<float> &weights);
++
++    Parameters _params;
++    std::vector<vmath::vec3> _centres;  // kernel centres (shifted)
++    std::vector<float> _G;              // 6 per particle: G00 G01 G02 G11 G12 G22
++    std::vector<float> _weights;        // normalisation x particle volume
++    std::vector<float> _reaches;        // kernel support radius per particle
++    double _reach = 0.0;
++    double _h = 0.0;
++};
++
++#endif
 diff --git a/src/engine/hkgpu.cpp b/src/engine/hkgpu.cpp
 new file mode 100644
 index 0000000..3fa27df
@@ -43905,7 +44739,7 @@ index 4f26b5b..864a0a9 100644
      float _outOfRangeDistance = 5.0f;  // in # of grid cells
  
 diff --git a/src/engine/particlemesher.cpp b/src/engine/particlemesher.cpp
-index 7957f20..cb61044 100644
+index 7957f20..337d71d 100644
 --- a/src/engine/particlemesher.cpp
 +++ b/src/engine/particlemesher.cpp
 @@ -28,6 +28,12 @@ SOFTWARE.
@@ -43921,7 +44755,17 @@ index 7957f20..cb61044 100644
  
  
  ParticleMesher::ParticleMesher() {
-@@ -63,6 +69,10 @@ TriangleMesh ParticleMesher::getPreviewMesh() {
+@@ -38,6 +44,9 @@ TriangleMesh ParticleMesher::meshParticles(ParticleMesherParameters params) {
+ 
+     MesherComputeChunkData data;
+     _generateComputeChunkData(data);
++    if (_isAnisotropic) {
++        _anisoCalibrate(data);
++    }
+     
+     double scale = _localdx / _subdx;
+     vmath::vec3 scaleVect(scale, scale, scale);
+@@ -63,6 +72,10 @@ TriangleMesh ParticleMesher::getPreviewMesh() {
      ScalarField field = _pfield;
      _setScalarFieldSolidBorders(field);
  
@@ -43932,7 +44776,7 @@ index 7957f20..cb61044 100644
      Polygonizer3d polygonizer(&field);
      return polygonizer.polygonizeSurface();
  }
-@@ -76,6 +86,7 @@ void ParticleMesher::_initialize(ParticleMesherParameters params) {
+@@ -76,6 +89,7 @@ void ParticleMesher::_initialize(ParticleMesherParameters params) {
      _subdivisions = params.subdivisions;
      _computechunks = params.computechunks;
      _radius = params.radius;
@@ -43940,7 +44784,7 @@ index 7957f20..cb61044 100644
  
      _isPreviewMesherEnabled = params.isPreviewMesherEnabled;
      if (_isPreviewMesherEnabled) {
-@@ -84,6 +95,7 @@ void ParticleMesher::_initialize(ParticleMesherParameters params) {
+@@ -84,6 +98,7 @@ void ParticleMesher::_initialize(ParticleMesherParameters params) {
  
      _particles = params.particles;
      _solidSDF = params.solidSDF;
@@ -43948,7 +44792,45 @@ index 7957f20..cb61044 100644
  
      _subisize = _isize * _subdivisions + 1;
      _subjsize = _jsize * _subdivisions + 1;
-@@ -290,9 +302,12 @@ TriangleMesh ParticleMesher::_polygonizeComputeChunk(MesherComputeChunk chunk,
+@@ -91,6 +106,20 @@ void ParticleMesher::_initialize(ParticleMesherParameters params) {
+     _subdx = _dx / (double)_subdivisions;
+ 
+     _initializeSeamData();
++
++    _interiorValue = (float)_radius;
++    _isAnisotropic = params.anisotropic;
++    if (_isAnisotropic) {
++        HKAniso::Parameters aparams;
++        aparams.dx = _dx;
++        aparams.blur = params.anisotropicSmoothing;
++        _aniso.prepare(_particles, aparams);
++        // chunks, active blocks and the particles each chunk takes all follow
++        // the radius: they now have to cover the stretched, smoothed kernels
++        if (_aniso.size() > 0) {
++            _radius = _aniso.getReach();
++        }
++    }
+ }
+ 
+ void ParticleMesher::_initializePreviewMesher(double pdx) {
+@@ -136,6 +165,16 @@ void ParticleMesher::_initializeComputeChunkDataActiveBlocks(MesherComputeChunkD
+     int numthreads = ThreadUtils::getMaxThreadCount();
+     GridUtils::featherGrid26(&(data.activeBlocks), numthreads);
+     GridUtils::featherGrid26(&(data.activeBlocks), numthreads);
++
++    // HydroKit: two blocks of feathering cover at least two block widths around
++    // each particle; anisotropic kernels may reach further, plus one block for
++    // the outside nodes the polygonizer needs
++    if (_isAnisotropic) {
++        int passes = (int)ceil(_radius / blockdx) + 1;
++        for (int n = 2; n < passes; n++) {
++            GridUtils::featherGrid26(&(data.activeBlocks), numthreads);
++        }
++    }
+ }
+ 
+ void ParticleMesher::_initializeComputeChunkDataComputeChunks(MesherComputeChunkData &data) {
+@@ -290,9 +329,12 @@ TriangleMesh ParticleMesher::_polygonizeComputeChunk(MesherComputeChunk chunk,
      _computeScalarField(fieldData);
      _updateSeamData(fieldData);
  
@@ -43964,12 +44846,21 @@ index 7957f20..cb61044 100644
      m.translate(chunk.positionOffset);
      
      return m;
-@@ -359,6 +374,310 @@ float ParticleMesher::_getMaxDistanceValue() {
+@@ -359,6 +401,430 @@ float ParticleMesher::_getMaxDistanceValue() {
  }
  
  void ParticleMesher::_computeScalarField(ScalarFieldData &fieldData) {
 +    // HydroKit: the GPU computes the same field bit for bit (hkgpu_kernels.cu);
 +    // whenever it cannot, the CPU does
++    if (_isAnisotropic) {
++        _computeScalarFieldAniso(fieldData);
++        _applyInteriorCells(fieldData);
++        if (_isPreviewMesherEnabled) {
++            _addComputeChunkScalarFieldToPreviewField(fieldData);
++        }
++        return;
++    }
++
 +    bool done = false;
 +    if (_useGPU) {
 +        std::vector<float> gpuField;
@@ -44040,7 +44931,7 @@ index 7957f20..cb61044 100644
 +
 +    Array3d<float> *fieldValues = fieldData.fieldValues.getPointerToScalarField();
 +    vmath::vec3 offset = fieldData.computeChunk.positionOffset;
-+    float insideValue = (float)_radius;
++    float insideValue = _interiorValue;
 +    for (int k = 0; k < fieldValues->depth; k++) {
 +        for (int j = 0; j < fieldValues->height; j++) {
 +            for (int i = 0; i < fieldValues->width; i++) {
@@ -44255,6 +45146,117 @@ index 7957f20..cb61044 100644
 +    _mergeGPUPreviewValues(_pfield);
 +}
 +
++bool ParticleMesher::_isInteriorNode(vmath::vec3 p) {
++    GridIndex g = Grid3d::positionToGridIndex(p, _dx);
++    return _interiorCells->isIndexInRange(g) && _interiorCells->get(g);
++}
++
++void ParticleMesher::_anisoCalibrate(MesherComputeChunkData &data) {
++    // HydroKit: the surface threshold that encloses the particles' volume.
++    // Every marker particle stands for dx^3 / 8
++    // (FluidSimulation::_initializeParticleRadii), a cell of merged particles
++    // for dx^3. A fixed threshold lost 23 % of the water in the prototype
++    // (sparse spray and churned pools fall below it) and broke the pool into
++    // "crushed ice". Calibrated, the engine's mesh holds +1.0 % at mesh detail
++    // 2, +0.4 % at 3 (learning scene, frames 106-120).
++    // Obstacles and the domain walls: the polygonizer cuts the surface at the
++    // solid's zero level (Polygonizer3d::_vertexInterp), so each node counts
++    // with the part of its cell outside the solid. Learning scene, frames
++    // 106-108, 8.43 m3 of particles: counting solid nodes fully gave 8.08 m3,
++    // leaving them out 8.73 m3.
++    const int nbins = 16384;
++    const double maxValue = 4.0;
++    std::vector<double> histogram(nbins, 0.0);
++    for (size_t cidx = 0; cidx < data.computeChunks.size(); cidx++) {
++        MesherComputeChunk c = data.computeChunks[cidx];
++        std::vector<float> phi;
++        _aniso.computeField(c.positionOffset, c.isize, c.jsize, c.ksize, _subdx, phi);
++
++        // a chunk's last node layer is the next chunk's first
++        int ie = c.isize, je = c.jsize, ke = c.ksize;
++        if (cidx + 1 < data.computeChunks.size()) {
++            if (c.splitDirection == Direction::U) {
++                ie--;
++            } else if (c.splitDirection == Direction::V) {
++                je--;
++            } else {
++                ke--;
++            }
++        }
++        for (int k = 0; k < ke; k++) {
++            for (int j = 0; j < je; j++) {
++                for (int i = 0; i < ie; i++) {
++                    double v = phi[(size_t)i + (size_t)c.isize * ((size_t)j + (size_t)c.jsize * k)];
++                    vmath::vec3 p = c.positionOffset + Grid3d::GridIndexToPosition(i, j, k, _subdx);
++                    if (_interiorCells != nullptr && _isInteriorNode(p)) {
++                        v = maxValue;
++                    }
++                    if (v <= 0.0) {
++                        continue;
++                    }
++                    double outside = 0.5 + _solidSDF->trilinearInterpolate(p) / _subdx;
++                    if (outside <= 0.0) {
++                        continue;
++                    }
++                    int b = std::min(nbins - 1, (int)(v / maxValue * nbins));
++                    histogram[b] += std::min(outside, 1.0);
++                }
++            }
++        }
++    }
++
++    double cellVolume = _dx * _dx * _dx;
++    double target = (double)_particles->size() * cellVolume / 8.0;
++    if (_interiorCells != nullptr) {
++        long long interior = 0;
++        for (int k = 0; k < _interiorCells->depth; k++) {
++            for (int j = 0; j < _interiorCells->height; j++) {
++                for (int i = 0; i < _interiorCells->width; i++) {
++                    if (_interiorCells->get(i, j, k)) {
++                        interior++;
++                    }
++                }
++            }
++        }
++        target += (double)interior * cellVolume;
++    }
++    double targetNodes = target / (_subdx * _subdx * _subdx);
++
++    // Thin spray alone may hold less than its volume above any threshold:
++    // then the lowest threshold that still separates drops is used
++    const double minThreshold = 0.02;
++    const double maxThreshold = 0.95;
++    double threshold = minThreshold;
++    double sum = 0.0;
++    for (int b = nbins - 1; b >= 0; b--) {
++        if (histogram[b] > 0.0 && sum + histogram[b] >= targetNodes) {
++            double frac = (targetNodes - sum) / histogram[b];
++            threshold = (b + 1 - frac) * maxValue / nbins;
++            break;
++        }
++        sum += histogram[b];
++    }
++    _anisoThreshold = std::min(std::max(threshold, minThreshold), maxThreshold);
++    _interiorValue = (float)std::max(1.0 - _anisoThreshold, 0.05);
++}
++
++void ParticleMesher::_computeScalarFieldAniso(ScalarFieldData &fieldData) {
++    Array3d<float> *fieldValues = fieldData.fieldValues.getPointerToScalarField();
++    int isize = fieldValues->width;
++    int jsize = fieldValues->height;
++    int ksize = fieldValues->depth;
++    std::vector<float> phi;
++    _aniso.computeField(fieldData.computeChunk.positionOffset, isize, jsize, ksize, _subdx, phi);
++    float threshold = (float)_anisoThreshold;
++    for (int k = 0; k < ksize; k++) {
++        for (int j = 0; j < jsize; j++) {
++            for (int i = 0; i < isize; i++) {
++                fieldValues->set(i, j, k, phi[(size_t)i + (size_t)isize * ((size_t)j + (size_t)jsize * k)] - threshold);
++            }
++        }
++    }
++}
++
 +void ParticleMesher::_mergeGPUPreviewValues(ScalarField &target) {
 +    int pi = _pisize + 1;
 +    int pj = _pjsize + 1;
@@ -44275,7 +45277,7 @@ index 7957f20..cb61044 100644
      ParticleGridCountData gridCountData;
      _computeGridCountData(fieldData, gridCountData);
  
-@@ -433,10 +752,6 @@ void ParticleMesher::_computeScalarField(ScalarFieldData &fieldData) {
+@@ -433,10 +899,6 @@ void ParticleMesher::_computeScalarField(ScalarFieldData &fieldData) {
          computeBlockQueue.notifyFinished();
          producerThreads[i].join();
      }
@@ -44287,10 +45289,18 @@ index 7957f20..cb61044 100644
  
  void ParticleMesher::_computeGridCountData(ScalarFieldData &fieldData, 
 diff --git a/src/engine/particlemesher.h b/src/engine/particlemesher.h
-index fd41eb4..f5032fe 100644
+index fd41eb4..683b134 100644
 --- a/src/engine/particlemesher.h
 +++ b/src/engine/particlemesher.h
-@@ -47,7 +47,15 @@ struct ParticleMesherParameters {
+@@ -31,6 +31,7 @@ SOFTWARE.
+ #include "blockarray3d.h"
+ #include "scalarfield.h"
+ #include "boundedbuffer.h"
++#include "hkaniso.h"
+ 
+ class TriangleMesh;
+ class MeshLevelSet;
+@@ -47,7 +48,20 @@ struct ParticleMesherParameters {
  
      bool isPreviewMesherEnabled = false;
      double previewdx = 0.0;
@@ -44304,10 +45314,24 @@ index fd41eb4..f5032fe 100644
 +    // liquid and are filled instead of meshed from particles. May be null.
 +    Array3d<bool> *interiorCells = nullptr;
 +
++    // HydroKit: the field from anisotropic kernels instead of spheres
++    // (hkaniso.h); smoothing is the Gaussian sigma in dx
++    bool anisotropic = false;
++    double anisotropicSmoothing = 0.5;
++
      std::vector<vmath::vec3> *particles;
      MeshLevelSet *solidSDF;
  };
-@@ -138,6 +146,12 @@ private:
+@@ -58,6 +72,8 @@ public:
+     ParticleMesher();
+     TriangleMesh meshParticles(ParticleMesherParameters params);
+     TriangleMesh getPreviewMesh();
++    // HydroKit: the surface threshold the anisotropic field was cut at
++    double getAnisotropicThreshold() { return _anisoThreshold; }
+ 
+ private:
+     enum class Direction { U, V, W };
+@@ -138,6 +154,15 @@ private:
                                      ScalarFieldData &fieldData);
      float _getMaxDistanceValue();
      void _computeScalarField(ScalarFieldData &fieldData);
@@ -44317,10 +45341,13 @@ index fd41eb4..f5032fe 100644
 +    void _mergeGPUPreviewValues(ScalarField &target);
 +    bool _polygonizeGPU(ScalarField &field, MeshLevelSet *solidSDF, TriangleMesh &mesh);
 +    void _applyInteriorCells(ScalarFieldData &fieldData);
++    void _anisoCalibrate(MesherComputeChunkData &data);
++    void _computeScalarFieldAniso(ScalarFieldData &fieldData);
++    bool _isInteriorNode(vmath::vec3 p);
      void _computeGridCountData(ScalarFieldData &fieldData, 
                                 ParticleGridCountData &gridCountData);
      void _initializeGridCountData(ScalarFieldData &fieldData, 
-@@ -176,14 +190,20 @@ private:
+@@ -176,14 +201,26 @@ private:
      double _radius = 0.0;
  
      bool _isPreviewMesherEnabled = false;
@@ -44338,6 +45365,12 @@ index fd41eb4..f5032fe 100644
      std::vector<vmath::vec3> *_particles;
      MeshLevelSet *_solidSDF;
 +    Array3d<bool> *_interiorCells = nullptr;
++    // value given to nodes in interior cells (field > 0 is inside)
++    float _interiorValue = 0.0f;
++
++    bool _isAnisotropic = false;
++    HKAniso _aniso;
++    double _anisoThreshold = 0.0;
  
      // Internal Parameters
      int _blockwidth = 10;
@@ -44580,6 +45613,45 @@ index bb2f47c..4bc54c6 100644
  
  private:
  
+diff --git a/src/engine/trianglemesh.cpp b/src/engine/trianglemesh.cpp
+index 90ed57b..0a1c0b8 100644
+--- a/src/engine/trianglemesh.cpp
++++ b/src/engine/trianglemesh.cpp
+@@ -668,6 +668,20 @@ void TriangleMesh::smooth(double value, int iterations) {
+     _vertexTriangles.clear();
+ }
+ 
++void TriangleMesh::smoothTaubin(double lambda, double mu, int iterations) {
++    if (iterations == 0) {
++        return;
++    }
++
++    _vertexTriangles.clear();
++    _updateVertexTriangles();
++    for (int i = 0; i < iterations; i++) {
++        _smoothTriangleMesh(lambda);
++        _smoothTriangleMesh(mu);
++    }
++    _vertexTriangles.clear();
++}
++
+ std::vector<vmath::vec3> TriangleMesh::_smoothTriangleMeshColors(double value, std::vector<vmath::vec3> &colors) {
+     std::vector<vmath::vec3> newcolors;
+     newcolors.reserve(vertices.size());
+diff --git a/src/engine/trianglemesh.h b/src/engine/trianglemesh.h
+index e7807bf..a5cc5ab 100644
+--- a/src/engine/trianglemesh.h
++++ b/src/engine/trianglemesh.h
+@@ -60,6 +60,9 @@ public:
+     void updateVertexTriangles();
+     void clearVertexTriangles();
+     void smooth(double value, int iterations);
++    // HydroKit: Taubin smoothing (a step in, a slightly larger step out):
++    // smooths without shrinking the mesh
++    void smoothTaubin(double lambda, double mu, int iterations);
+     std::vector<vmath::vec3> smoothColors(double value, int iterations, std::vector<vmath::vec3> colors);
+     void getFaceNeighbours(unsigned int tidx, std::vector<int> &n);
+     void getFaceNeighbours(Triangle t, std::vector<int> &n);
 diff --git a/src/engine/velocityadvector.cpp b/src/engine/velocityadvector.cpp
 index 62e0722..2e92c9a 100644
 --- a/src/engine/velocityadvector.cpp

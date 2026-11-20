@@ -4,12 +4,13 @@
 # One object per output type whose mesh is reloaded from the cache on every
 # frame change. A handler on frame_change_post keeps it current;
 # render_pre covers rendering an image sequence, where frame_change_post does
-# not always fire.
+# not always fire. While the timeline plays, Light Playback shows lighter
+# versions of the same results (sim/abspielen.py).
 
 import bpy
 from mathutils import Vector
 
-from . import cache, geometrie
+from . import abspielen, cache, geometrie
 
 OBERFLAECHE = "HK_Oberflaeche"
 
@@ -99,6 +100,29 @@ def netz_fuellen(me, co, ecken, start, glatt=None):
     me.update(calc_edges=True)
 
 
+# WHAT A FRAME OF WATER COSTS IN BLENDER 5.2 (measured 5.11.2026 on 235,000
+# vertices, 469,000 triangles): 117 ms, of that the face starts 44 ms
+# (polygons.loop_start has no array access, every face goes through RNA,
+# and nothing else can set them) and the edges 40 ms (a mesh with faces
+# needs them; update() computes them with calc_edges=False too). Positions,
+# corners and smooth flags are array copies. At Resolution 300 with Mesh
+# Detail 3 (1.27 million triangles) 169 ms. So the full mesh keeps its
+# price; only Light Playback makes it smaller (sim/abspielen.py).
+# Face starts 0, 3, 6, ... and smooth flags are cut from arrays kept across
+# frames instead of two new ones per frame.
+_DREIECKE = {"start": None, "glatt": None}
+
+
+def _dreieck_felder(nt):
+    import numpy as np
+    start = _DREIECKE["start"]
+    if start is None or len(start) < nt:
+        groesse = max(nt, 4096) * 5 // 4
+        _DREIECKE["start"] = start = np.arange(0, groesse * 3, 3, dtype=np.int32)
+        _DREIECKE["glatt"] = np.ones(groesse, dtype=bool)
+    return start[:nt], _DREIECKE["glatt"][:nt]
+
+
 def _mesh_setzen(obj, daten, versatz):
     """Write the surface from (vertices, triangles) into the object.
 
@@ -117,11 +141,11 @@ def _mesh_setzen(obj, daten, versatz):
         me.update()
         return 0
     co = (ecken.reshape(-1, 3) + np.asarray(versatz, np.float32)).ravel()
+    start, glatt = _dreieck_felder(nt)
     # Without smoothing the water shows every single triangle and looks
     # faceted — the surface comes out of marching cubes as a triangle mesh.
     netz_fuellen(me, co.astype(np.float32, copy=False),
-                 np.asarray(dreiecke, np.int32),
-                 np.arange(0, nt * 3, 3, dtype=np.int32), np.ones(nt, dtype=bool))
+                 np.asarray(dreiecke, np.int32), start, glatt)
     return nv
 
 
@@ -160,6 +184,43 @@ def _groessen_tabellen(spray_d50_mm):
 def _ausduennen_kennung(kennungen):
     import numpy as np
     return (kennungen.astype(np.int32) * 167) % 256
+
+
+# Everything the whitewater looks up by its one-byte ID, as 256-entry tables
+# built once per spray size instead of on every frame (_groessen_tabellen
+# alone builds a 4,000-step quantile): the random value, the size factor per
+# type in float32 as the points store it, and per amount the IDs it keeps.
+# A lookup per shown point gives exactly the values the old per-particle
+# arithmetic gave, without float64 temporaries over all particles.
+_TABELLEN = {}
+
+
+def _tabellen(spray_d50_mm):
+    import numpy as np
+    tab = _TABELLEN.get(spray_d50_mm)
+    if tab is None:
+        tab = {a: np.ascontiguousarray(t, np.float32)
+               for a, t in _groessen_tabellen(spray_d50_mm).items()}
+        tab["zufall"] = np.arange(256, dtype=np.uint8).astype(np.float32) / 255.0
+        if len(_TABELLEN) > 8:
+            _TABELLEN.clear()
+        _TABELLEN[spray_d50_mm] = tab
+    return tab
+
+
+_BEHALTEN = {}
+
+
+def _behalten(anteil):
+    """256 flags: the IDs an amount keeps (the amount sliders' rule)."""
+    import numpy as np
+    tab = _BEHALTEN.get(anteil)
+    if tab is None:
+        tab = _ausduennen_kennung(np.arange(256)) < anteil * 255.0
+        if len(_BEHALTEN) > 64:
+            _BEHALTEN.clear()
+        _BEHALTEN[anteil] = tab
+    return tab
 
 
 def _punkte_setzen(obj, punkte, zufall=None, tempo=None, groesse=None):
@@ -223,24 +284,45 @@ def ergebnisse_leeren():
         if obj is not None and obj.type == 'MESH':
             obj.data.clear_geometry()
             obj.data.update()
+    abspielen.gezeigt(None, False)
 
 
-def gischt_laden(scene, pfad, versatz, frame, nebel_engine=False, daten=None):
+def gischt_laden(scene, pfad, versatz, frame, nebel_engine=False, daten=None,
+                 domain=None, leicht=None):
     """Split particles by type and show the configured amount.
 
     Filtering uses the ID (one byte per particle), not the index: the ID
     stays with the particle for its lifetime, so at 50 % the same half stays
     visible while scrubbing. A filter by index would catch different particles
     on every frame and flicker visibly. daten: the frame's particles if
-    already read (gischt_neu).
+    already read (gischt_neu), as cache.partikel_lesen_np gives them; they
+    are not changed. domain: the domain if already looked up. leicht: Light
+    Playback, a share per type on top of the amount (abspielen.anteile), or
+    None for the full result.
+
+    SPEED, measured on the user's waterfall (Resolution 300, frames 95-101,
+    2 million particles): 212 ms before, 70 ms now, both with reading
+    (50 -> 14 ms) and writing the points (18 ms). The file was read and then
+    copied per block; the mist classification ran over every particle, even
+    with the engine's own mist, where its result was thrown away, and it
+    only ever acts on spray (7,000 here); every type was picked by a boolean
+    mask over all particles, from every array; the size tables were rebuilt
+    per frame and gathered in float64. Now only the blocks needed are read,
+    straight into their arrays; the classification looks at the spray alone;
+    each type is picked once by its indices (np.take copies whole rows); ID
+    to random value, size and amount are 256-entry tables; the offset is
+    added to the shown points only. The points come out bit for bit the same.
     """
     import numpy as np
     if daten is None:
-        daten = cache.partikel_lesen(pfad, frame)
+        # Velocity for the points (motion blur) and for telling mist from
+        # spray; the lifetime only for the latter
+        daten = cache.partikel_lesen_np(pfad, frame, tempo=leicht is None or not nebel_engine,
+                                        leben=not nebel_engine)
     if daten is None:
         return _gischt_leeren()
-    roh_pos, roh_vel, roh_leben, roh_kenn, roh_arten = daten
-    n = len(roh_kenn)
+    pos, tempo, leben, kennungen, arten = daten
+    n = len(kennungen)
     gefunden = {}
     leer = np.zeros((0, 3), np.float32)
     if n == 0:
@@ -249,13 +331,8 @@ def gischt_laden(scene, pfad, versatz, frame, nebel_engine=False, daten=None):
                 gefunden[name] = _punkte_setzen(_objekt_holen(name, scene), leer)
         return gefunden
 
-    positionen = (np.frombuffer(roh_pos, np.float32).reshape(-1, 3)
-                  + np.asarray(versatz, np.float32))
-    tempo = np.frombuffer(roh_vel, np.float32).reshape(-1, 3)
-    leben = np.frombuffer(roh_leben, np.float32)
-    kennungen = np.frombuffer(roh_kenn, np.uint8)
-    arten = np.frombuffer(roh_arten, np.uint8).copy()
-    domain = geometrie.finde_domain(scene)
+    if domain is None:
+        domain = geometrie.finde_domain(scene)
     dp = domain.hydrokit if domain else None
 
     # MIST FROM SPRAY — three ways it forms, all readable from the data:
@@ -279,48 +356,62 @@ def gischt_laden(scene, pfad, versatz, frame, nebel_engine=False, daten=None):
     #
     # The engine does NOT deliver mist on its dust channel (measured in
     # eight configurations, always zero); this way it is in the data.
-    tempo_schwelle = getattr(dp, "nebel_tempo", 0.6) if dp else 0.6
-    langsam2 = tempo_schwelle * tempo_schwelle
-    ab_alter = getattr(dp, "nebel_ab_alter", 0.8) if dp else 0.8
-    ab_alter = min(max(ab_alter, 0.0), 0.99)
-    mittel_leben = getattr(dp, "gischt_lebensdauer", 2.5) if dp else 2.5
-    fein = getattr(dp, "nebel_feinanteil", 0.05) if dp else 0.05
-    aufprall = getattr(dp, "nebel_aufprall_tempo", 3.0) if dp else 3.0
-    aufprall2 = aufprall * aufprall
-
-    v2 = (tempo * tempo).sum(axis=1)
-    zufall = kennungen.astype(np.float32) / 255.0
-    # Since all drops are born with the same lifetime, this is exactly the
-    # used-up share of their lifetime — 0 at birth.
-    verbraucht = np.clip(1.0 - leben / max(mittel_leben, 1e-6), 0.0, 1.0)
-    spray = arten == 2
-
-    # 1. Impact: already fast at birth (otherwise mist in mid-fall,
-    #    measured 93 particles at z=+0.44), a fixed fine share of it
-    aufschlag = (v2 > aufprall2) & (verbraucht < 0.25) & (zufall < fein)
-    # 2. Long fall, staggered by ID — no sudden cloud
-    langer_fall = ((verbraucht >= ab_alter)
-                   & ((verbraucht - ab_alter) / (1.0 - ab_alter) > zufall))
-    # 3. Slowed down, but only after a while in the air. With a spread birth
-    #    lifetime, newborns already counted as half used up
-    #    (measured: 71 of 107 mist particles at frame 45 came from that).
-    abgebremst = (v2 < langsam2) & (verbraucht > 0.35)
+    tabellen = _tabellen(getattr(dp, "spray_groesse", 3.0) if dp else 3.0)
     # If the engine has already atomised, mist is a type of its own in the
     # data and flies physically right. Then recolour nothing.
     if not nebel_engine:
-        arten[spray & (aufschlag | langer_fall | abgebremst)] = 3
+        tempo_schwelle = getattr(dp, "nebel_tempo", 0.6) if dp else 0.6
+        langsam2 = tempo_schwelle * tempo_schwelle
+        ab_alter = getattr(dp, "nebel_ab_alter", 0.8) if dp else 0.8
+        ab_alter = min(max(ab_alter, 0.0), 0.99)
+        mittel_leben = getattr(dp, "gischt_lebensdauer", 2.5) if dp else 2.5
+        fein = getattr(dp, "nebel_feinanteil", 0.05) if dp else 0.05
+        aufprall = getattr(dp, "nebel_aufprall_tempo", 3.0) if dp else 3.0
+        aufprall2 = aufprall * aufprall
 
-    tabellen = _groessen_tabellen(getattr(dp, "spray_groesse", 3.0) if dp else 3.0)
-    duenn = _ausduennen_kennung(kennungen)
+        spray = np.flatnonzero(arten == 2)
+        t = np.take(tempo, spray, axis=0)
+        v2 = (t * t).sum(axis=1)
+        zufall = np.take(tabellen["zufall"], np.take(kennungen, spray))
+        # Since all drops are born with the same lifetime, this is exactly the
+        # used-up share of their lifetime — 0 at birth.
+        verbraucht = np.clip(1.0 - np.take(leben, spray) / max(mittel_leben, 1e-6), 0.0, 1.0)
+
+        # 1. Impact: already fast at birth (otherwise mist in mid-fall,
+        #    measured 93 particles at z=+0.44), a fixed fine share of it
+        aufschlag = (v2 > aufprall2) & (verbraucht < 0.25) & (zufall < fein)
+        # 2. Long fall, staggered by ID — no sudden cloud
+        langer_fall = ((verbraucht >= ab_alter)
+                       & ((verbraucht - ab_alter) / (1.0 - ab_alter) > zufall))
+        # 3. Slowed down, but only after a while in the air. With a spread birth
+        #    lifetime, newborns already counted as half used up
+        #    (measured: 71 of 107 mist particles at frame 45 came from that).
+        abgebremst = (v2 < langsam2) & (verbraucht > 0.35)
+        nebel = spray[aufschlag | langer_fall | abgebremst]
+        if len(nebel):
+            arten = arten.copy()            # daten may be kept for the next slider step
+            arten[nebel] = 3
+
+    verschiebung = np.asarray(versatz, np.float32)
     for a, (artname, objname, mengenname) in ARTEN.items():
-        maske = arten == a
+        # Indices in particle order, as the boolean mask picked them
+        wahl = np.flatnonzero(arten == a)
         anteil = getattr(dp, mengenname, 1.0) if dp else 1.0
-        if anteil < 1.0:
-            maske &= duenn < anteil * 255.0
-        if maske.any() or bpy.data.objects.get(objname) is not None:
+        if leicht is not None:
+            anteil *= leicht[a]
+        if anteil < 1.0 and len(wahl):
+            wahl = wahl[np.take(_behalten(anteil), np.take(kennungen, wahl))]
+        if len(wahl) or bpy.data.objects.get(objname) is not None:
             o = _objekt_holen(objname, scene)
-            gefunden[objname] = _punkte_setzen(o, positionen[maske], zufall[maske],
-                                               tempo[maske], tabellen[a][kennungen[maske]])
+            punkte = np.take(pos, wahl, axis=0)
+            punkte += verschiebung
+            kenn = np.take(kennungen, wahl)
+            # Light Playback leaves out the velocity: only Cycles motion blur
+            # reads it, and every render loads the full frame
+            gefunden[objname] = _punkte_setzen(
+                o, punkte, np.take(tabellen["zufall"], kenn),
+                None if leicht is not None else np.take(tempo, wahl, axis=0),
+                np.take(tabellen[a], kenn))
     return gefunden
 
 
@@ -337,7 +428,7 @@ def gischt_neu(scene):
     if domain is None:
         return None
     pfad = cache.pfad_aufloesen(domain.hydrokit.cache_pfad)
-    info = cache.info_lesen(pfad)
+    info = cache.info_gemerkt(pfad)
     if info is None or not info.get("gischt"):
         return None
     frame = scene.frame_current
@@ -346,12 +437,18 @@ def gischt_neu(scene):
         schluessel = (datei, os.stat(datei).st_mtime_ns)
     except OSError:
         return None
+    nebel_engine = info.get("nebel_engine", False)
     if _GEZOGEN.get("schluessel") != schluessel:
         _GEZOGEN.clear()
-        _GEZOGEN["daten"] = cache.partikel_lesen(pfad, frame)
+        _GEZOGEN["daten"] = cache.partikel_lesen_np(pfad, frame, leben=not nebel_engine)
         _GEZOGEN["schluessel"] = schluessel
-    return gischt_laden(scene, pfad, info.get("versatz", [0.0, 0.0, 0.0]), frame,
-                        info.get("nebel_engine", False), _GEZOGEN["daten"])
+    # While playing, the whitewater stays as light as the frame around it
+    leicht = abspielen.anteile(pfad, domain.hydrokit) if abspielen.leicht(scene) else None
+    erg = gischt_laden(scene, pfad, info.get("versatz", [0.0, 0.0, 0.0]), frame,
+                       nebel_engine, _GEZOGEN["daten"], domain=domain, leicht=leicht)
+    if leicht is not None:
+        abspielen.gezeigt(scene, True)
+    return erg
 
 
 def _viewport_mesh(d, info):
@@ -370,14 +467,24 @@ def _viewport_mesh(d, info):
     return False
 
 
-def frame_laden(scene, frame=None):
-    """Fetch surface and whitewater of the frame from the cache."""
-    geometrie.hilfsobjekte_unsichtbar(scene)
-    domain = geometrie.finde_domain(scene)
+def frame_laden(scene, frame=None, leicht=None):
+    """Fetch surface and whitewater of the frame from the cache.
+
+    leicht: None decides by itself (Light Playback while the timeline plays,
+    sim/abspielen.py); False forces the full frame, e.g. before saving."""
+    if leicht is None:
+        leicht = abspielen.leicht(scene)
+    if abspielen.SPIELT and not _rendert:
+        # Looked up once per playback (abspielen.domain): finde_domain and
+        # hilfsobjekte_unsichtbar walk every object of the scene
+        domain = abspielen.domain(scene)
+    else:
+        geometrie.hilfsobjekte_unsichtbar(scene)
+        domain = geometrie.finde_domain(scene)
     if domain is None:
         return None
     pfad = cache.pfad_aufloesen(domain.hydrokit.cache_pfad)
-    info = cache.info_lesen(pfad)
+    info = cache.info_gemerkt(pfad)
     if info is None:
         return None
     versatz = info.get("versatz", [0.0, 0.0, 0.0])
@@ -386,19 +493,24 @@ def frame_laden(scene, frame=None):
 
     ergebnis = {}
     obj = _objekt_holen(OBERFLAECHE, scene)
-    # The lighter viewport mesh in the viewport, the full one when rendering.
     daten = None
-    if not _rendert and _viewport_mesh(domain.hydrokit, info):
+    if leicht:
+        daten = abspielen.flaeche_leicht(pfad, frame, info)
+    elif not _rendert and _viewport_mesh(domain.hydrokit, info):
+        # The lighter viewport mesh in the viewport, the full one when rendering.
         daten = cache.mesh_lesen_np(pfad, frame, "vorschau")
     if daten is None:
         daten = cache.mesh_lesen_np(pfad, frame)
     ergebnis[OBERFLAECHE] = _mesh_setzen(obj, daten, versatz)
 
     if info.get("gischt"):
+        anteile = abspielen.anteile(pfad, domain.hydrokit) if leicht else None
         ergebnis.update(gischt_laden(scene, pfad, versatz, frame,
-                                     info.get("nebel_engine", False)))
+                                     info.get("nebel_engine", False),
+                                     domain=domain, leicht=anteile))
     else:
         ergebnis.update(_gischt_leeren())   # a bake without whitewater after one with
+    abspielen.gezeigt(scene, leicht)
     from . import linse
     ergebnis["HK_Linsentropfen"] = linse.anzeigen(scene, frame)
     return ergebnis
@@ -534,6 +646,7 @@ def lade_handler_an():
     bpy.app.handlers.load_post.append(_nach_laden)
     for liste, fn in _RENDER_HANDLER:
         getattr(bpy.app.handlers, liste).append(fn)
+    abspielen.an()
     if not bpy.app.background:
         # register() runs without a scene in the context
         bpy.app.timers.register(_nach_aktivieren, first_interval=0.1)
@@ -543,6 +656,8 @@ def lade_handler_aus():
     # The display handler too: after a reload or an update of the add-on the
     # old module's _bei_frame stayed and scrubbing ran the old code
     _entfernen((("load_post", _nach_laden),) + _RENDER_HANDLER + _HANDLER)
+    # Light Playback's hooks; a light frame on display goes back to full
+    abspielen.aus()
 
 
 def _nach_aktivieren():

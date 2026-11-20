@@ -70,6 +70,10 @@ try:
     props.cache_pfad = cache_ordner
     props.rechengeraet = 'GPU'
     props.linse_an = False
+    # The probe never resumes. Its cache lies in /tmp, on Fedora RAM (tmpfs):
+    # the final state of a quarter domain of water at Resolution 1000 would
+    # put up to 7 GB there (274 million particles before merging, 25 bytes each)
+    props.zwischenstand_an = False
     scene.frame_end = scene.frame_start + frames - 1
 
     b = backen.Backer(scene)

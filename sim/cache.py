@@ -55,15 +55,50 @@ def info_lesen(cache):
         return None
 
 
+# The frame handler reads info.json on every frame; parsed again only when
+# the file changes (a new bake writes it anew)
+_INFO = {}
+
+
+def info_gemerkt(cache):
+    """info_lesen for every frame: the same dict until the file's stamp
+    (mtime, size, inode) changes. Shared: callers must not change it."""
+    if not cache:
+        return None
+    pfad = os.path.join(cache, INFO)
+    try:
+        st = os.stat(pfad)
+    except OSError:
+        return None
+    stempel = (pfad, st.st_mtime_ns, st.st_size, st.st_ino)
+    if _INFO.get("stempel") == stempel:
+        return _INFO["info"]
+    info = info_lesen(cache)
+    _INFO.clear()
+    if info is not None:            # a half-written file is read again next time
+        _INFO.update(stempel=stempel, info=info)
+    return info
+
+
 def _datei(cache, frame, art=None):
     name = f"{art or ''}{frame:06d}.bobj"
     return os.path.join(cache, FRAMES, name)
 
 
+def _ganz_schreiben(pfad, teile):
+    """The file appears complete or not at all: written beside and renamed
+    over. The bake writes from its worker thread while the viewport follows
+    the timeline; a frame read half-written showed torn water."""
+    neu = pfad + ".tmp"
+    with open(neu, "wb") as f:
+        for teil in teile:
+            f.write(teil)
+    os.replace(neu, pfad)
+
+
 def mesh_schreiben(cache, frame, rohdaten, art=None):
     vorbereiten(cache)
-    with open(_datei(cache, frame, art), "wb") as f:
-        f.write(rohdaten)
+    _ganz_schreiben(_datei(cache, frame, art), (rohdaten,))
 
 
 def mesh_lesen(cache, frame, art=None):
@@ -110,14 +145,9 @@ def partikel_schreiben(cache, frame, positionen, geschwindigkeiten,
     import struct
     vorbereiten(cache)
     n = len(kennungen)
-    with open(partikel_datei(cache, frame), "wb") as f:
-        f.write(KOPF)
-        f.write(struct.pack("<i", n))
-        f.write(positionen)
-        f.write(geschwindigkeiten)
-        f.write(lebensdauern)
-        f.write(kennungen)
-        f.write(arten)
+    _ganz_schreiben(partikel_datei(cache, frame),
+                    (KOPF, struct.pack("<i", n), positionen, geschwindigkeiten,
+                     lebensdauern, kennungen, arten))
 
 
 def partikel_lesen(cache, frame):
@@ -143,6 +173,63 @@ def partikel_lesen(cache, frame):
         if len(daten) < f_:
             return None
         return daten[a:b], daten[b:c], daten[c:d], daten[d:e], daten[e:f_]
+    except (OSError, ValueError, struct.error):
+        return None
+
+
+def _block(f, dtype, anzahl):
+    """The next `anzahl` values of the file straight into an array of their own."""
+    import numpy as np
+    a = np.empty(anzahl, dtype)
+    puffer = memoryview(a).cast("B")
+    gelesen = 0
+    while gelesen < len(puffer):
+        k = f.readinto(puffer[gelesen:])
+        if not k:
+            raise ValueError("file ends early")
+        gelesen += k
+    return a
+
+
+def partikel_lesen_np(cache, frame, tempo=True, leben=True):
+    """(positions n x 3, velocity n x 3, lifetime, IDs, types) as NumPy arrays,
+    or None: partikel_lesen for the display. tempo/leben False skip those
+    blocks (None in their place).
+
+    partikel_lesen reads the whole file into one bytes object and copies
+    every block out of it again: 50 ms in Blender at frames 95-101 of the
+    user's waterfall (Resolution 300, 2 million particles, 59 MB). Here each
+    block wanted goes straight from the file into its array: 14 ms with the
+    velocity, 7 ms without (Light Playback); the lifetime only for the mist
+    classification."""
+    import numpy as np
+    import struct
+    pfad = partikel_datei(cache, frame)
+    try:
+        with open(pfad, "rb", buffering=0) as f:
+            kopf = f.read(8)
+            if len(kopf) < 8 or kopf[:4] != KOPF:
+                return None            # older cache, please bake again
+            n = struct.unpack("<i", kopf[4:8])[0]
+            if n <= 0:
+                drei = np.zeros((0, 3), np.float32)
+                return (drei, drei.copy() if tempo else None,
+                        np.zeros(0, np.float32) if leben else None,
+                        np.zeros(0, np.uint8), np.zeros(0, np.uint8))
+            if os.fstat(f.fileno()).st_size < 8 + 30 * n:
+                return None            # being written, or cut off
+            pos = _block(f, np.float32, 3 * n).reshape(-1, 3)
+            vel = None
+            if tempo:
+                vel = _block(f, np.float32, 3 * n).reshape(-1, 3)
+            else:
+                f.seek(12 * n, os.SEEK_CUR)
+            dauer = None
+            if leben:
+                dauer = _block(f, np.float32, n)
+            else:
+                f.seek(4 * n, os.SEEK_CUR)
+            return pos, vel, dauer, _block(f, np.uint8, n), _block(f, np.uint8, n)
     except (OSError, ValueError, struct.error):
         return None
 
@@ -199,4 +286,22 @@ def leeren(cache):
     pfad = os.path.join(cache, INFO)
     if os.path.isfile(pfad):
         os.remove(pfad)
+    # with the leftovers of a save that crashed: a full state each, about
+    # 1 GB for the waterfall at Resolution 1000 after 250 frames
+    for rest in ("zwischenstand", "zwischenstand_neu", "zwischenstand_alt"):
+        shutil.rmtree(os.path.join(cache, rest), ignore_errors=True)
     vorbereiten(cache)
+
+
+def frames_nach_loeschen(cache, frame):
+    """Remove what was baked after `frame`: a resumed bake computes it anew."""
+    ordner = os.path.join(cache, FRAMES)
+    if not os.path.isdir(ordner):
+        return
+    for name in os.listdir(ordner):
+        zahl = os.path.splitext(name)[0][-6:]
+        if zahl.isdigit() and int(zahl) > frame:
+            try:
+                os.remove(os.path.join(ordner, name))
+            except OSError:
+                pass

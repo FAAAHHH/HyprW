@@ -26,7 +26,9 @@ class HYDROKIT_AddonPreferences(bpy.types.AddonPreferences):
         default=8, min=1, max=10)
 
     def draw(self, context):
-        self.layout.prop(self, "scroll_schritte")
+        zeile = self.layout.row(align=True)
+        zeile.prop(self, "scroll_schritte")
+        zeile.operator("hydrokit.hilfe", text="", icon='INFO', emboss=False).thema = "scroll_schritte"
 
 
 def _schritte(context):

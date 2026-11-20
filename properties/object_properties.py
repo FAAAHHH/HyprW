@@ -4,6 +4,8 @@
 # HyprW's own tagging of simulation objects, independent of FLIP Fluids.
 # Every Blender object can be given a role in the simulation.
 
+import math
+
 import bpy
 
 
@@ -52,6 +54,132 @@ def _menge_neu(self, context):
         pass
 
 
+# --- Hybrid Water: one lever for the five engine values ----------------
+# Position L is the largest merged particle, 2^L standard particles, so deep
+# water keeps 2^(-L/3) of the surface resolution per axis: 79 / 63 / 50 / 40
+# / 31 / 25 % for 1..6. The gentle end also keeps a thicker fine layer under
+# the surface and more distance to obstacles. From 3 on the depths are the
+# ones of Adams et al. 2007, Sec. 4.2 (split 2, merge 3 radii) and the
+# obstacle distance the engine's collision band (3 cells); less would not be
+# safe, so the strong end only adds levels. Position 3 is exactly the old
+# defaults: a file from before the lever shows 3 and bakes as before.
+# Measured 06.11.2026, deep tank 3.2 x 1.6 m with 1.4 m of water (28 cells,
+# Resolution 64), an inflow moving the surface, 3 s on the CPU: 395k
+# particles without, 375k / 321k / 314k at 1 / 3 / 6. The surface mesh moved
+# 0.02-0.03 cells on average, as much as a run without Hybrid Water with
+# another seed; the time per frame stayed within the noise. In 28 cells only
+# about a quarter of the water lies deep enough and far enough from the walls
+# to merge; level 6 needs 11.4 cells below the surface.
+HYBRID_HEBEL = {
+    # position: (Split Depth, Merge Depth, Obstacle Distance in cells)
+    1: (3.0, 4.5, 5),
+    2: (2.5, 3.75, 4),
+    3: (2.0, 3.0, 3),
+    4: (2.0, 3.0, 3),
+    5: (2.0, 3.0, 3),
+    6: (2.0, 3.0, 3),
+}
+
+
+def _hebel_lesen(self):
+    return self.adaptiv_max_stufe
+
+
+def _hebel_setzen(self, wert):
+    """The lever is no stored value but a view of the Advanced values, so a
+    file from before it keeps its own. Only a real move sets them: writing
+    back the same position (a script, Copy to Selected) keeps values tuned by
+    hand."""
+    wert = min(max(int(wert), 1), 6)
+    if wert == self.adaptiv_max_stufe:
+        return
+    teil, verschmelz, abstand = HYBRID_HEBEL[wert]
+    self.adaptiv_max_stufe = wert
+    self.adaptiv_teil_faktor = teil
+    self.adaptiv_verschmelz_faktor = verschmelz
+    self.adaptiv_hindernis_abstand = abstand
+
+
+# Liquids at about 20 °C: (name, dynamic viscosity Pa·s, density kg/m³,
+# surface tension N/m). Measured values; where none was found the value is
+# marked APPROXIMATION in the help text (ui/hilfe.py, "fluessigkeit").
+#   Water      1.0 mPa·s, 998 kg/m³, 72.7 mN/m.
+#   Olive oil  84 mPa·s, 915 kg/m³; 30.7-33 mN/m measured, 32 taken.
+#   Glycerol   1412 mPa·s; 1261 kg/m³, 64.0 mN/m.
+#   Honey      0.42-23.4 Pa·s with water content and temperature (Yanniotis,
+#              Skaltsi & Karaburnioti 2006), 10 taken; 1420 kg/m³. Surface
+#              tension: APPROXIMATION, glycerol's.
+#   Lava       basalt in the field mostly 10^3-10^4 Pa·s (Chevrel et al. 2019,
+#              Etna 150-3000), 1000 taken; melt 2620 kg/m³. Surface tension:
+#              APPROXIMATION 0.35 N/m. Lava cooling and setting is not simulated.
+FLUESSIGKEITEN = {
+    'WASSER':    ("Water",     0.0010, 998.0,  0.0727),
+    'OLIVENOEL': ("Olive Oil", 0.084,  915.0,  0.032),
+    'GLYZERIN':  ("Glycerol",  1.412,  1261.0, 0.064),
+    'HONIG':     ("Honey",     10.0,   1420.0, 0.064),
+    'LAVA':      ("Lava",      1000.0, 2620.0, 0.35),
+}
+
+
+def _fluessigkeit_setzen(self, context):
+    werte = FLUESSIGKEITEN.get(self.fluessigkeit)
+    if werte is not None:
+        _, self.zaehigkeit, self.dichte, self.oberflaechenspannung = werte
+
+
+def fluessigkeit_eigen(d):
+    """True when the three values were changed by hand from the chosen liquid."""
+    werte = FLUESSIGKEITEN.get(d.fluessigkeit)
+    if werte is None:
+        return True
+    _, mu, rho, sigma = werte
+    return any(abs(a - b) > 1e-6 * max(abs(b), 1e-9)
+               for a, b in ((d.zaehigkeit, mu), (d.dichte, rho), (d.oberflaechenspannung, sigma)))
+
+
+def hybrid_eigen(d):
+    """The Advanced values are not the lever's own for its position: tuned
+    by hand, or from a file of before the lever."""
+    soll = HYBRID_HEBEL.get(d.adaptiv_max_stufe)
+    return soll is None or (abs(d.adaptiv_teil_faktor - soll[0]) > 1e-4
+                            or abs(d.adaptiv_verschmelz_faktor - soll[1]) > 1e-4
+                            or d.adaptiv_hindernis_abstand != soll[2])
+
+
+def _hybrid_verschmelztiefe(alpha, beta, stufe):
+    """Depth in cells below the surface from which particles merge into this
+    level, as FluidSimulation::_updateAdaptiveParticles computes it: radius
+    R = 0.866 dx 2^(L/3) (the level set radius), split below alpha R + 1,
+    merge beyond max(beta R + 1, max(alpha R + 1, R + 2) + 1)."""
+    beta = max(beta, alpha)                 # as sim/backen.py passes it
+    r = 0.5 * math.sqrt(3.0) * 2.0 ** (stufe / 3.0)
+    return max(beta * r + 1.0, max(alpha * r + 1.0, r + 2.0) + 1.0)
+
+
+def hybrid_kennzahlen(d, dx=None):
+    """What the Hybrid Water values mean, in plain numbers for the panel:
+    resolution of deep water per axis in %, volume factor of the largest
+    particle, and in cells (times dx = metres): the layer under the surface
+    and the distance to obstacles that always stay at the standard size, and
+    the depth from which the largest particles form. Moving water stays fine
+    deeper still (the engine's look-ahead)."""
+    stufe = d.adaptiv_max_stufe
+    alpha, beta = d.adaptiv_teil_faktor, d.adaptiv_verschmelz_faktor
+    r1 = 0.5 * math.sqrt(3.0) * 2.0 ** (1.0 / 3.0)
+    k = {
+        "aufloesung": 100.0 * 2.0 ** (-stufe / 3.0),
+        "faktor": 2 ** stufe,
+        "fein_tiefe": _hybrid_verschmelztiefe(alpha, beta, 1),
+        "grob_tiefe": _hybrid_verschmelztiefe(alpha, beta, stufe),
+        # merging into level 1 needs obstacle distance + ceil(R1) + 1 cells
+        "fein_abstand": d.adaptiv_hindernis_abstand + math.ceil(r1) + 1,
+    }
+    if dx:
+        # a standard particle holds dx^3 / 8 (8 per cell)
+        k["volumen"] = k["faktor"] * dx ** 3 / 8.0
+    return k
+
+
 class HydroKitObjectProperties(bpy.types.PropertyGroup):
 
     typ: bpy.props.EnumProperty(
@@ -79,7 +207,10 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
         name="Resolution",
         description=("Voxels along the LONGEST side. Memory and compute time grow "
                      "with its cube: twice as high = eight times as expensive"),
-        default=65, min=10, max=1024, soft_max=300,
+        # Typing goes to 8192; the slider stops at 2000. Without a soft_max a
+        # drag across the slider jumped to thousands: Resolution 1000 on the
+        # 155.8 m waterfall domain is already 137 million cells, 19-131 GB
+        default=65, min=10, max=8192, soft_max=2000,
     )
     cache_pfad: bpy.props.StringProperty(
         name="Cache",
@@ -88,6 +219,18 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
         # Without this option Blender 5 paints every // path red ("invalid"),
         # even though HyprW resolves relative paths.
         options={'PATH_SUPPORTS_BLEND_RELATIVE'},
+    )
+    zwischenstand_an: bpy.props.BoolProperty(
+        name="Saved States",
+        description=("Keeps the state of the water in the cache during a bake, "
+                     "so a stopped or crashed bake can resume"),
+        default=True,
+    )
+    zwischenstand_alle: bpy.props.IntProperty(
+        name="Every",
+        description=("Saves the state every this many frames. Only the newest "
+                     "stays. A cancelled bake saves its last frame too"),
+        default=5, min=1, soft_max=50,
     )
     # --- Compute device (GPU support of HyprW's engine, engine_patch/
     # README.md section 8). Only steps with a GPU version can run there; the
@@ -205,6 +348,27 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
         default=1, min=1, max=3,
         update=lambda self, context: _anzeige_neu(context),
     )
+    # ANISOTROPIC SURFACE (engine_patch/README.md section 12). Measured on the
+    # learning scene, frame 105 (8.44 m3 of particles, 20.11.2026): the
+    # spheres' mesh holds 10.1 m3 and looks like gel; anisotropic kernels with
+    # a fixed threshold 6.5 m3, the pool breaks into crushed ice; with the
+    # smoothed field and the calibrated threshold 8.48 m3 and 41 instead of
+    # 114 loose pieces
+    netz_anisotrop: bpy.props.BoolProperty(
+        name="Anisotropic Surface",
+        description=("Build the water surface from kernels stretched along the surface "
+                     "instead of round particle blobs: thin sheets stay thin, the pool keeps "
+                     "its real volume instead of swelling like gel. Takes effect with the next bake"),
+        default=False,
+        update=lambda self, context: _anzeige_neu(context),
+    )
+    netz_glaettung: bpy.props.FloatProperty(
+        name="Smoothness",
+        description=("How much the surface is smoothed, in simulation cells. The amount of water "
+                     "barely changes; more calms ripples and melts small drops into the water"),
+        default=0.5, min=0.0, max=3.0, soft_max=1.5, step=10, precision=2,
+        update=lambda self, context: _anzeige_neu(context),
+    )
     gischt: bpy.props.BoolProperty(
         name="Whitewater",
         description="Simulate foam, bubbles, spray and dust",
@@ -224,17 +388,30 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
     # standard size. Split/merge depths after Adams, Pauly, Keiser, Guibas
     # 2007, "Adaptively Sampled Particle Fluids", Section 4.2.
     adaptiv_an: bpy.props.BoolProperty(
-        name="Adaptive Particles",
+        name="Hybrid Water",
         description=("Deep water merges into bigger particles, near the air and "
                      "obstacles it stays at the standard size (8 per cell). The "
                      "grid resolution does not change. Saves time and memory in "
                      "deep, calm water; a waterfall stays fine"),
         default=False,
     )
+    # The one lever (HYBRID_HEBEL above). get/set instead of a stored value:
+    # the bake keeps reading the five values below, unchanged. Not
+    # animatable: an animated lever would rewrite them on every frame
+    adaptiv_hebel: bpy.props.IntProperty(
+        name="Hybrid Strength",
+        description=("How coarse deep water may become. 1 = barely: particles of 2 "
+                     "merge, only deep down (79 % resolution per axis). 6 = strong: "
+                     "up to 64 merge into one (25 %). Also sets Split Depth, Merge "
+                     "Depth and Obstacle Distance under Advanced"),
+        default=3, min=1, max=6,
+        get=_hebel_lesen, set=_hebel_setzen, options=set(),
+    )
     adaptiv_max_stufe: bpy.props.IntProperty(
         name="Max Size",
         description=("Largest particle in halvings: every step doubles the volume. "
-                     "3 = one particle per cell (8 standard particles)"),
+                     "3 = one particle per cell (8 standard particles). Hybrid "
+                     "Strength sets it"),
         default=3, min=1, max=6,
     )
     adaptiv_teilungsdauer: bpy.props.FloatProperty(
@@ -248,7 +425,8 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
     adaptiv_teil_faktor: bpy.props.FloatProperty(
         name="Split Depth",
         description=("A merged particle splits once it is less deep below the "
-                     "surface than this many of its radii. Adams et al. 2007: 2"),
+                     "surface than this many of its radii. Adams et al. 2007: 2. "
+                     "Hybrid Strength sets it"),
         default=2.0, min=1.0, max=10.0,
     )
     adaptiv_verschmelz_faktor: bpy.props.FloatProperty(
@@ -256,15 +434,55 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
         description=("Particles merge only if the merged particle is deeper than "
                      "this many of its radii. Keep it above Split Depth, otherwise "
                      "particles flicker between merging and splitting. "
-                     "Adams et al. 2007: 3"),
+                     "Adams et al. 2007: 3. Hybrid Strength sets it"),
         default=3.0, min=1.0, max=12.0,
     )
     adaptiv_hindernis_abstand: bpy.props.IntProperty(
         name="Obstacle Distance",
         description=("Merged particles keep at least this many cells away from "
                      "obstacles and the domain walls; the engine resolves "
-                     "collisions within 3 cells"),
+                     "collisions within 3 cells. Hybrid Strength sets it"),
         default=3, min=1, max=10,
+    )
+
+    # --- Liquid: viscosity and surface tension (FLUESSIGKEITEN above) -----
+    # Off by default: the bake is then bit-identical to before. Water's own
+    # viscosity is far below what the grid resolves at these scales.
+    fluessigkeit: bpy.props.EnumProperty(
+        name="Liquid",
+        description="Sets viscosity, density and surface tension to measured values",
+        items=[(k, v[0], f"{v[1]:g} Pa·s, {v[2]:g} kg/m³, {v[3] * 1000:g} mN/m")
+               for k, v in FLUESSIGKEITEN.items()],
+        default='WASSER', update=_fluessigkeit_setzen,
+    )
+    zaehigkeit_an: bpy.props.BoolProperty(
+        name="Viscosity",
+        description=("Makes the liquid viscous: honey, oil, lava. Costs a solve "
+                     "per step, the more the more viscous"),
+        default=False,
+    )
+    zaehigkeit: bpy.props.FloatProperty(
+        name="Viscosity",
+        description="Dynamic viscosity in Pa·s (water 0.001, honey about 10)",
+        default=0.0010, min=0.0, soft_max=10000.0, precision=4,
+    )
+    dichte: bpy.props.FloatProperty(
+        name="Density",
+        description=("Density in kg/m³. Viscosity and surface tension act per "
+                     "kilogram: the engine gets them divided by it"),
+        default=998.0, min=1.0, soft_max=20000.0, precision=0,
+    )
+    oberflaechenspannung_an: bpy.props.BoolProperty(
+        name="Surface Tension",
+        description=("Pulls the surface together: drops round off, thin streams "
+                     "hold together. Only visible in small scenes, where it "
+                     "costs extra steps"),
+        default=False,
+    )
+    oberflaechenspannung: bpy.props.FloatProperty(
+        name="Surface Tension",
+        description="Surface tension in N/m (water 0.0727)",
+        default=0.0727, min=0.0, soft_max=1.0, precision=4,
     )
     offene_raender: bpy.props.BoolVectorProperty(
         name="Open Borders",

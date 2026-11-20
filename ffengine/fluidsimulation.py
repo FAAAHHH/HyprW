@@ -603,6 +603,34 @@ class FluidSimulation(object):
         pb.execute_lib_func(libfunc, [self()])
 
     @property
+    def enable_anisotropic_meshing(self):
+        """HydroKit: water surface from anisotropic kernels (hkaniso.h)."""
+        libfunc = lib.FluidSimulation_is_anisotropic_meshing_enabled
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
+        return bool(pb.execute_lib_func(libfunc, [self()]))
+
+    @enable_anisotropic_meshing.setter
+    def enable_anisotropic_meshing(self, boolval):
+        if boolval:
+            libfunc = lib.FluidSimulation_enable_anisotropic_meshing
+        else:
+            libfunc = lib.FluidSimulation_disable_anisotropic_meshing
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self()])
+
+    @property
+    def anisotropic_meshing_smoothness(self):
+        libfunc = lib.FluidSimulation_get_anisotropic_meshing_smoothness
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_double)
+        return pb.execute_lib_func(libfunc, [self()])
+
+    @anisotropic_meshing_smoothness.setter
+    def anisotropic_meshing_smoothness(self, s):
+        libfunc = lib.FluidSimulation_set_anisotropic_meshing_smoothness
+        pb.init_lib_func(libfunc, [c_void_p, c_double, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), s])
+
+    @property
     def enable_gpu_whitewater(self):
         """HydroKit: whitewater step on the GPU — the surface curvature (gpu.py)."""
         libfunc = lib.FluidSimulation_is_gpu_whitewater_enabled
@@ -3550,6 +3578,37 @@ class FluidSimulation(object):
         libfunc = lib.FluidSimulation_load_marker_particle_id_data
         pb.init_lib_func(libfunc, [c_void_p, FluidSimulationMarkerParticleIDData_t, c_void_p], None)
         pb.execute_lib_func(libfunc, [self(), pdata])
+
+    # HydroKit: resuming a bake with adaptive particle sizes
+    def has_marker_particle_level_data(self):
+        libfunc = lib.FluidSimulation_has_marker_particle_level_data
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_int)
+        return bool(pb.execute_lib_func(libfunc, [self()]))
+
+    def get_marker_particle_level_data_range(self, start_idx, end_idx):
+        size_of_char = 1
+        return self._get_output_data_range(lib.FluidSimulation_get_marker_particle_level_data_range,
+                                           start_idx, end_idx, size_of_char)
+
+    def load_marker_particle_level_data(self, num_particles, level_data):
+        c_level_data = (c_char * len(level_data)).from_buffer_copy(level_data)
+        libfunc = lib.FluidSimulation_load_marker_particle_level_data
+        pb.init_lib_func(libfunc, [c_void_p, c_size_t, c_char_p, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), c_size_t(num_particles),
+                                      ctypes.cast(c_level_data, c_char_p)])
+
+    def get_adaptive_particle_times(self):
+        libfunc = lib.FluidSimulation_get_adaptive_particle_time
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_double)
+        zeit = pb.execute_lib_func(libfunc, [self()])
+        libfunc = lib.FluidSimulation_get_adaptive_particle_next_pass_time
+        pb.init_lib_func(libfunc, [c_void_p, c_void_p], c_double)
+        return zeit, pb.execute_lib_func(libfunc, [self()])
+
+    def set_adaptive_particle_times(self, time, next_pass_time):
+        libfunc = lib.FluidSimulation_set_adaptive_particle_times
+        pb.init_lib_func(libfunc, [c_void_p, c_double, c_double, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), time, next_pass_time])
 
     def load_diffuse_particle_data(self, num_particles, position_data, velocity_data,
                                          lifetime_data, type_data, id_data):
