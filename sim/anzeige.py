@@ -223,7 +223,7 @@ def _behalten(anteil):
     return tab
 
 
-def _punkte_setzen(obj, punkte, zufall=None, tempo=None, groesse=None):
+def _punkte_setzen(obj, punkte, zufall=None, tempo=None, groesse=None, alter=None):
     """Point cloud (NumPy n x 3) as a mesh without edges and faces.
 
     zufall: per point 0..1 from the engine ID — it stays with the particle for
@@ -250,7 +250,8 @@ def _punkte_setzen(obj, punkte, zufall=None, tempo=None, groesse=None):
                 attr = me.attributes.new("hk_zufall", 'FLOAT', 'POINT')
             attr.data.foreach_set("value", zufall)
         for name, typ, werte in (("velocity", 'FLOAT_VECTOR', tempo),
-                                 ("hk_groesse", 'FLOAT', groesse)):
+                                 ("hk_groesse", 'FLOAT', groesse),
+                                 ("hk_alter", 'FLOAT', alter)):
             if werte is None:
                 continue
             attr = me.attributes.get(name)
@@ -408,10 +409,16 @@ def gischt_laden(scene, pfad, versatz, frame, nebel_engine=False, daten=None,
             kenn = np.take(kennungen, wahl)
             # Light Playback leaves out the velocity: only Cycles motion blur
             # reads it, and every render loads the full frame
+            # Foam ages (Foam Decay): its age is lifetime minus what is left,
+            # as the engine's foam lifetime modifier is 1
+            alter = None
+            if artname == "foam" and leben is not None:
+                lebensdauer = getattr(dp, "gischt_lebensdauer", 2.5) if dp else 2.5
+                alter = np.maximum(lebensdauer - np.take(leben, wahl), 0.0)
             gefunden[objname] = _punkte_setzen(
                 o, punkte, np.take(tabellen["zufall"], kenn),
                 None if leicht is not None else np.take(tempo, wahl, axis=0),
-                np.take(tabellen[a], kenn))
+                np.take(tabellen[a], kenn), alter)
     return gefunden
 
 
@@ -502,6 +509,16 @@ def frame_laden(scene, frame=None, leicht=None):
     if daten is None:
         daten = cache.mesh_lesen_np(pfad, frame)
     ergebnis[OBERFLAECHE] = _mesh_setzen(obj, daten, versatz)
+    # The full mesh's vertex velocities: Aerated Falling Water reads how far
+    # the water has fallen, Cycles blurs with them
+    if daten is not None and (info.get("netz") or {}).get("tempo"):
+        tempo = cache.mesh_lesen_np(pfad, frame, "tempo")
+        if tempo is not None and len(tempo[0]) == len(daten[0]) and len(tempo[0]):
+            attr = obj.data.attributes.get("velocity")
+            if attr is None:
+                attr = obj.data.attributes.new("velocity", 'FLOAT_VECTOR', 'POINT')
+            attr.data.foreach_set("vector", tempo[0])
+            obj.data.update()
 
     if info.get("gischt"):
         anteile = abspielen.anteile(pfad, domain.hydrokit) if leicht else None

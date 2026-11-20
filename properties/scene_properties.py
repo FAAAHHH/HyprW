@@ -64,6 +64,15 @@ def _andere_pausieren_neu(self, context):
         pass
 
 
+def _nass_neu(props, context):
+    """Wet Obstacles switched: compute and insert, or take out."""
+    from ..sim import nass
+    try:
+        nass.schalten(context.scene, props.nass_an)
+    except Exception as e:      # a material the group cannot handle
+        print("HyprW Wet Obstacles:", e)
+
+
 class HydroKitSceneProperties(bpy.types.PropertyGroup):
 
     whitewater_scale_multiplier: bpy.props.FloatProperty(
@@ -121,6 +130,47 @@ class HydroKitSceneProperties(bpy.types.PropertyGroup):
         description=("Fine roughness of the water surface. At 0 it is a "
                      "perfect mirror and looks like liquid metal"),
         default=0.035, min=0.0, max=0.5, soft_max=0.12,
+    )
+
+    wasser_rauheit_wind: bpy.props.BoolProperty(
+        name="Ripples From Wind",
+        description=("Roughen the surface by the wind of the scene's wind force fields, "
+                     "as measured on the sea by Cox & Munk 1954: 2 m/s gives 0.32, 5 m/s "
+                     "0.40, 10 m/s 0.48. Ripples stays the value for calm water"),
+        default=True,
+    )
+    wasser_kaustik_echt: bpy.props.BoolProperty(
+        name="Traced Caustics",
+        description=("Let Cycles trace the light the water surface refracts onto the ground "
+                     "(Shadow Caustics) instead of the caustic pattern: the network comes "
+                     "from the simulated waves. Sharper network, but measured 31 % darker on "
+                     "average and slower to render; marks the water, the other meshes and "
+                     "the lights for it"),
+        default=False,
+    )
+
+    luft_an: bpy.props.BoolProperty(
+        name="Aerated Falling Water",
+        description=("Falling water takes up air and turns white the further it falls, "
+                     "fully white at its breakup length (Ervine et al. 1997, Castillo; "
+                     "measured air in falling jets: Carrillo et al. 2020). The bake writes "
+                     "the surface's velocities for it, which also give motion blur"),
+        default=True,
+    )
+    luft_aufreisslaenge: bpy.props.FloatProperty(
+        name="Breakup Length",
+        description=("Fall height after which the falling water is fully aerated and white. "
+                     "0 = computed from the largest inflow (its speed and thickness)"),
+        default=0.0, min=0.0, soft_max=50.0, unit='LENGTH',
+    )
+    nass_an: bpy.props.BoolProperty(
+        name="Wet Obstacles",
+        description=("Obstacles turn darker with a water film where the water has touched "
+                     "them, from that frame on (Lekner & Dorf 1988: an albedo of 0.3 becomes "
+                     "0.18). Adds a node group in front of the Principled BSDF of the "
+                     "obstacles' materials; off takes it out again"),
+        default=False,
+        update=lambda self, context: _nass_neu(self, context),
     )
 
     # --- Studio look (materials_ops.baue_wasser): the principle of studio

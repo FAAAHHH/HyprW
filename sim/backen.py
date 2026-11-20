@@ -472,6 +472,11 @@ def _sim_aufbauen(scene, domain, bericht=None, stand=None):
     # Which second mesh the cache holds, for sim/anzeige.py
     vorschau = zweites_netz(props)
     netz = {"detail": render_stufe, "vorschau": vorschau}
+    # AERATED FALLING WATER (operators/materials_ops.luft_kennwerte): the
+    # material reads from the velocity per vertex how far the water has fallen
+    if scene.hydrokit.luft_an:
+        sim.enable_surface_velocity_attribute = True
+        netz["tempo"] = True
     # ANISOTROPIC SURFACE (engine_patch/README.md section 12): kernels
     # stretched along the surface, a smoothed field and a threshold that keeps
     # the particles' volume, instead of the union of spheres
@@ -685,6 +690,10 @@ class Backer:
             self.engine_fehler = engine_fehler_text(self.frame, e)
             raise EngineFehler(self.engine_fehler) from e
         cache.mesh_schreiben(self.pfad, self.frame, self.sim.get_surface_data())
+        if (self.info.get("netz") or {}).get("tempo"):
+            # one velocity per surface vertex, in the bobj layout without triangles
+            cache.mesh_schreiben(self.pfad, self.frame,
+                                 self.sim.get_surface_velocity_attribute_data(), "tempo")
         if self.sim.enable_preview_mesh_output:
             cache.mesh_schreiben(self.pfad, self.frame,
                                  self.sim.get_surface_preview_data(), "vorschau")

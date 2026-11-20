@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/FAAAHHH/HyprW/releases/latest"><b>Download</b></a> ·
   <a href="#installation">Install</a> ·
-  <a href="#new-in-130">What's new</a> ·
+  <a href="#new-in-140">What's new</a> ·
   <a href="#features">Features</a> ·
   <a href="#tests">Tests</a>
 </p>
@@ -31,6 +31,34 @@ surface, whitewater, mist, wind, drops on the camera lens and materials.
 Wherever it can, it uses measured physics with a source; where it has to
 approximate, the code and the help texts say so. The FLIP Fluids add-on is
 **not** needed.
+
+## New in 1.4.0
+
+### Measured materials
+
+<p align="center">
+  <img src="docs/images/aeration.jpg" alt="The same waterfall twice: left the falling water stays clear, right its lower part has turned milky white with air" width="100%">
+  <br>
+  <sub><b>Aerated Falling Water.</b> Left: the breakup length computed for this scene (11.4 m) — a 2 m fall stays nearly clear, as in nature. Right: breakup at 2 m, as for water that has fallen as far as in a tall fall.</sub>
+</p>
+
+- **Aerated Falling Water** (on): falling water takes up air and turns white
+  the further it falls, fully white at its breakup length — from the jet
+  breakup of Ervine et al. (1997) with the turbulence at the edge measured by
+  Carrillo et al. (2020). The bake now stores the surface's velocities, which
+  also give Cycles motion blur.
+- **Ripples From Wind** (on): wind roughens the surface as Cox & Munk (1954)
+  measured it — 0.32 at 2 m/s, 0.40 at 5 m/s, 0.48 at 10 m/s.
+- **Wet Obstacles** (off): rocks and banks turn darker with a water film from
+  the frame the water reaches them (Lekner & Dorf 1988: an albedo of 0.3
+  becomes 0.18). Works on coarse obstacles too.
+- **Foam Decay** (3 s): foam thins out as it ages instead of vanishing at once
+  (Callaghan et al. 2012: 1.4–4.8 s on the sea).
+- **Traced Caustics** (off): Cycles traces the light the simulated waves
+  throw onto the ground. Sharper network than the pattern, but measured 31 %
+  darker on average — the method is approximate.
+- Foam brightness checked against field measurements: a foam particle
+  reflects 31 %, within the measured 22–55 %.
 
 ## New in 1.3.0
 
@@ -180,8 +208,9 @@ everything runs on the CPU.
 
     blender -b --factory-startup --python tests/blender_kameratropfen.py -- <path to this folder>
 
-292 checks: bake, the bake's worker thread, the anisotropic surface's
-volume, inflow turbulence, viscosity and surface tension, saved states and resuming, roles,
+300 checks: bake, the bake's worker thread, the anisotropic surface's
+volume, inflow turbulence, measured materials (wind, foam, caustics, wet
+obstacles, aerated water), viscosity and surface tension, saved states and resuming, roles,
 obstacle sheets, Hybrid Water, GPU against CPU, playback, materials, lens
 drops, register and unregister.
 

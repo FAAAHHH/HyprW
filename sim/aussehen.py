@@ -502,17 +502,39 @@ def _schaum_shader(nt, z, radius, blasen, luftanteil):
 
 
 def baue_gischt_material(art, radius=0.01, blasen=0, spray_farbe=(1.0, 1.0, 1.0),
-                         luftanteil=0.2):
+                         luftanteil=0.2, dispersion=False, zerfall=0.0):
     """blasen: bubbles across a foam particle (0 = no texture);
-    spray_farbe: tint of the spray drops; luftanteil: air fraction of foam."""
+    spray_farbe: tint of the spray drops; luftanteil: air fraction of foam;
+    dispersion: spray drops refract each colour with its own index, which
+    makes rainbows (Cycles); zerfall: foam decay time in s (0 = none)."""
     mat = _material(PREFIX + ZEICHENGROESSE[art][0])
     nt = mat.node_tree
     out = nt.nodes.new("ShaderNodeOutputMaterial"); out.location = (340, 0)
     z = _zufall(nt)
     if art == "foam":
         # Aerated water, see schaum_optik
-        nt.links.new(_schaum_shader(nt, z, radius, blasen, luftanteil), out.inputs["Surface"])
-        out.location = (1400, 420)
+        schaum = _schaum_shader(nt, z, radius, blasen, luftanteil)
+        if zerfall > 0.0:
+            # FOAM AGES: a patch thins out as exp(-age / decay time)
+            # (Callaghan et al. 2012: effective decay 1.4-4.8 s); the age
+            # comes per particle as "hk_alter" (sim/anzeige.py)
+            alter = nt.nodes.new("ShaderNodeAttribute"); alter.location = (900, 700)
+            alter.attribute_name = "hk_alter"
+            rate = nt.nodes.new("ShaderNodeMath"); rate.location = (1080, 700)
+            rate.operation = 'MULTIPLY'
+            rate.inputs[1].default_value = -1.0 / zerfall
+            nt.links.new(alter.outputs["Fac"], rate.inputs[0])
+            da = nt.nodes.new("ShaderNodeMath"); da.location = (1240, 700)
+            da.operation = 'EXPONENT'
+            nt.links.new(rate.outputs["Value"], da.inputs[0])
+            klar = nt.nodes.new("ShaderNodeBsdfTransparent"); klar.location = (1240, 560)
+            mix = nt.nodes.new("ShaderNodeMixShader"); mix.location = (1420, 620)
+            nt.links.new(da.outputs["Value"], mix.inputs["Fac"])
+            nt.links.new(klar.outputs["BSDF"], mix.inputs[1])
+            nt.links.new(schaum, mix.inputs[2])
+            schaum = mix.outputs["Shader"]
+        nt.links.new(schaum, out.inputs["Surface"])
+        out.location = (1600, 420)
         if hasattr(mat, "use_transparent_shadow"):
             mat.use_transparent_shadow = True           # EEVEE: shadows see the straight part
         return mat
@@ -525,6 +547,28 @@ def baue_gischt_material(art, radius=0.01, blasen=0, spray_farbe=(1.0, 1.0, 1.0)
         i["IOR"].default_value = 1.0 / 1.333        # air in water
         if tr:
             i[tr].default_value = 1.0
+    elif dispersion:
+        # RAINBOWS: sunlight refracted into a drop, reflected once inside and
+        # refracted out leaves at about 42 degrees from the antisolar point,
+        # each colour at its own angle (Descartes). One clear glass per colour
+        # channel with water's index for it (Daimon & Masumura 2007), smooth.
+        from ..operators.materials_ops import WASSER_IOR_RGB
+        summe = None
+        for kanal, ior in enumerate(WASSER_IOR_RGB):
+            glas = nt.nodes.new("ShaderNodeBsdfGlass"); glas.location = (0, 300 - 180 * kanal)
+            glas.inputs["Color"].default_value = tuple(spray_farbe[c] if c == kanal else 0.0
+                                                       for c in range(3)) + (1.0,)
+            glas.inputs["Roughness"].default_value = 0.0
+            glas.inputs["IOR"].default_value = ior
+            if summe is None:
+                summe = glas.outputs["BSDF"]
+            else:
+                add = nt.nodes.new("ShaderNodeAddShader"); add.location = (180, 200 - 120 * kanal)
+                nt.links.new(summe, add.inputs[0]); nt.links.new(glas.outputs["BSDF"], add.inputs[1])
+                summe = add.outputs["Shader"]
+        nt.nodes.remove(bsdf)
+        nt.links.new(summe, out.inputs["Surface"])
+        return mat
     else:   # spray
         i["Base Color"].default_value = (*spray_farbe, 1.0)
         i["IOR"].default_value = 1.333
@@ -1059,6 +1103,13 @@ def nach_bake(context):
         for _, name, _ in anzeige.ARTEN.values():
             if name != "HK_Nebel" or info.get("nebel"):
                 anzeige._objekt_holen(name, scene)
+    # Wet obstacles follow the new bake
+    if scene.hydrokit.nass_an:
+        from . import nass
+        try:
+            nass.berechnen(scene)
+        except Exception as e:
+            print("HyprW Wet Obstacles:", e)
     stand, _ = look_stand(context, info)
     # A look from before LOOK_DX was sized for unknown cells: size it once
     if stand == 'ok' and info.get("gischt") and domain.get(LOOK_DX) is None:
@@ -1080,6 +1131,7 @@ def wasser_anwenden(context, wasser_variante=None):
     scene = context.scene
     mat = mo.wasser_aus_einstellungen(scene, wasser_variante)
     mo.volumen_strahlen(scene)
+    mo.kaustik_schalten(scene, scene.hydrokit.wasser_kaustik_echt)
     flaeche.data.materials.clear()
     flaeche.data.materials.append(mat)
     # smooth faceted water
@@ -1135,7 +1187,13 @@ def anwenden(context, wasser_variante=None, wasser=True):
         else:
             mat = baue_gischt_material(art, radius, props.schaum_blasen,
                                        tuple(props.spray_farbe),
-                                       props.schaum_luftanteil / 100.0)
+                                       props.schaum_luftanteil / 100.0,
+                                       zerfall=getattr(props, "schaum_zerfall", 0.0))
+            # Spray dispersion (dispersion=True) is not switched on with the
+            # water's: a rainbow is a caustic — camera ray, two refractions
+            # and a reflection must end in the small sun — and Cycles finds
+            # it only by chance. Tested 20.11.: 300,000 drops, 256 samples,
+            # coloured noise instead of a bow.
             ng = _gruppe_punkte("HK " + ZEICHENGROESSE[art][0], radius, mat)
         _modifier_setzen(obj, ng)
         erledigt[ZEICHENGROESSE[art][0]] = f"{radius*100:.2f} cm"

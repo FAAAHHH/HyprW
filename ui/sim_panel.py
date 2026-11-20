@@ -675,13 +675,35 @@ class HYDROKIT_PT_sim(bpy.types.Panel):
         _regler(wasser, sh, "wasser_sichtweite")
         _regler(wasser, sh, "wasser_geloest")
         _regler(wasser, sh, "wasser_kraeuselung")
+        _regler(wasser, sh, "wasser_rauheit_wind")
+        if sh.wasser_rauheit_wind:
+            from ..operators import materials_ops
+            wind = geometrie.windvektor(context.scene, sh.wind_faktor).length
+            if wind > 0.0:
+                _hinweis(wasser).label(
+                    text=f"   Wind {wind:.1f} m/s: roughness "
+                         f"{materials_ops.kraeuselung_wirksam(context.scene):.2f}")
+        _regler(wasser, sh, "wasser_kaustik_echt")
         _regler(wasser, sh, "wasser_schatten", slider=True)
         unter = wasser.column(align=True)
-        unter.enabled = sh.wasser_schatten > 0.0
+        unter.enabled = sh.wasser_schatten > 0.0 and not sh.wasser_kaustik_echt
         _regler(unter, sh, "wasser_kaustik", slider=True)
         _regler(unter, sh, "wasser_kaustik_groesse")
         _regler(wasser, sh, "wasser_wellen")
         _regler(wasser, sh, "wasser_dispersion")
+        _regler(wasser, sh, "nass_an")
+        luft = wasser.row(align=True)
+        luft.prop(sh, "luft_an", text="Aerated")
+        laenge = luft.row(align=True)
+        laenge.enabled = sh.luft_an
+        laenge.prop(sh, "luft_aufreisslaenge", text="Breakup")
+        _hilfe(luft, "luft_an")
+        if sh.luft_an:
+            from ..operators import materials_ops
+            kennwerte = materials_ops.luft_kennwerte(context.scene)
+            _hinweis(wasser).label(
+                text=(f"   White from {kennwerte[1]:.1f} m, fully at {kennwerte[0]:.1f} m of fall"
+                      if kennwerte else "   No inflow: set a Breakup Length"))
 
     def _gischt_aussehen(self, layout, context, domain, info):
         """How much of the baked whitewater shows, and how it looks. Usable
@@ -705,6 +727,7 @@ class HYDROKIT_PT_sim(bpy.types.Panel):
         _regler(spalte, d, "nebel_dichte_anzeige", text="Mist Density")
         _regler(spalte, d, "schaum_blasen")
         _regler(spalte, d, "schaum_luftanteil", slider=True)
+        _regler(spalte, d, "schaum_zerfall")
         _regler(spalte, d, "spray_farbe")
         _regler(spalte, context.scene.hydrokit, "whitewater_scale_multiplier")
 

@@ -763,6 +763,17 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
         default=4, min=0, max=12,
         update=_aussehen_neu,
     )
+    # FOAM AGES (sim/aussehen.py): Callaghan et al. 2012 (J. Geophys. Res.
+    # 117, C09015) filmed 552 breaking waves: foam patches decayed in 0.2 to
+    # 10.4 s each, the area-weighted effective decay time was 1.4 to 4.8 s.
+    schaum_zerfall: bpy.props.FloatProperty(
+        name="Foam Decay",
+        description=("Foam thins out with age: each foam particle fades as exp(-age / this "
+                     "time). Measured on the sea: 1.4 to 4.8 s (Callaghan et al. 2012). "
+                     "0 = foam stays until the engine removes it"),
+        default=3.0, min=0.0, soft_max=10.0, unit='TIME_ABSOLUTE',
+        update=_aussehen_neu,
+    )
     schaum_luftanteil: bpy.props.FloatProperty(
         name="Air in Foam", subtype='PERCENTAGE', min=1.0, max=60.0, default=20.0,
         description=("Air content of the foam (aerated water). More air scatters more: "

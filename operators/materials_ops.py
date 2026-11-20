@@ -100,6 +100,98 @@ WASSER_IOR_RGB = (1.33192, 1.33468, 1.33867)
 # the mean brightness on the ground. The pattern itself is an APPROXIMATION.
 KAUSTIK_LINIE = 0.05
 KAUSTIK_NORMIERUNG = 1.0 / 0.0938
+# ROUGHNESS FROM THE WIND. Cox & Munk 1954 (J. Opt. Soc. Am. 44:838) measured
+# the slopes of a wind-roughened clean sea from sun glitter: mean square
+# slope 0.003 + 5.12e-3 U (U in m/s at 10 m, +-0.004). The constant comes
+# from swell and lies within the error; on rivers and pools only the wind
+# term is used. Slopes below the simulation cells go into the microfacet
+# roughness: GGX alpha ~ sqrt(mean square slope) (APPROXIMATION: Beckmann
+# and GGX taken as equal), Blender's roughness = sqrt(alpha). Wind 2 m/s ->
+# 0.32, 5 m/s -> 0.40, 10 m/s -> 0.48. The near-surface wind is taken as
+# U10 (APPROXIMATION).
+COX_MUNK_WIND = 5.12e-3
+
+
+def wind_rauheit(wind):
+    """Blender roughness of a water surface in this wind (m/s)."""
+    return (COX_MUNK_WIND * max(wind, 0.0)) ** 0.25
+
+
+def kraeuselung_wirksam(scene):
+    """The roughness the water material gets: the Ripples slider for calm
+    water, rougher in wind when Ripples From Wind is on."""
+    p = scene.hydrokit
+    if not p.wasser_rauheit_wind:
+        return p.wasser_kraeuselung
+    from ..sim import geometrie
+    return max(p.wasser_kraeuselung, wind_rauheit(geometrie.windvektor(scene, p.wind_faktor).length))
+
+
+def luft_kennwerte(scene):
+    """(breakup length, onset height, jet thickness) in m for Aerated Falling
+    Water, or None. AERATED FALLING WATER: a falling jet takes up air in an
+    outer layer that spreads as it falls and reaches its core at the breakup
+    length (Ervine & Falvey 1987; measured void fraction across falling
+    jets: Carrillo, Ortega, Castillo & García 2020, Water 12:1773).
+      onset      Castillo's spread 4 phi sqrt(h) (sqrt(2H) - 2 sqrt(h)) starts
+                 at H = 2h; h = 1.5 critical depth (q^2/g)^(1/3) over the edge
+      turbulence Tu* = q^0.43 / IC, IC = 14.95 g^0.5 / (K^1.22 Cd^0.19),
+                 K 0.85, Cd 1.85 (Carrillo et al. 2020, eqs. 2-3)
+      breakup    L = 1.05 B Fr^2 / (1.14 Tu Fr^2)^0.82 (Ervine et al. 1997, for
+                 round jets; here with the thickness B for the diameter —
+                 APPROXIMATION), Fr^2 = U^2 / (g B)
+    From the inflow with the largest flow: its speed U and its thickness B
+    across the flow (along gravity for a level inflow). Breakup Length > 0
+    replaces the computed one."""
+    p = scene.hydrokit
+    g = 9.81
+    from ..sim import geometrie
+    best = None
+    for obj in geometrie.sammle_objekte(scene)['INFLOW']:
+        u = obj.hydrokit.zufluss_geschwindigkeit
+        tempo = (u[0] ** 2 + u[1] ** 2 + u[2] ** 2) ** 0.5
+        if tempo < 1e-3 or not obj.hydrokit.rolle_aktiv:
+            continue
+        d = obj.dimensions
+        if abs(u[2]) < (u[0] ** 2 + u[1] ** 2) ** 0.5:        # level: thickness along gravity
+            dicke = d[2]
+            breite = d[1] if abs(u[0]) >= abs(u[1]) else d[0]
+        else:                                               # falling: the thinner side
+            dicke, breite = sorted((d[0], d[1]))
+        if dicke <= 1e-4:
+            continue
+        menge = tempo * dicke * breite
+        if best is None or menge > best[0]:
+            best = (menge, tempo, dicke)
+    if best is None:
+        if p.luft_aufreisslaenge > 0.0:
+            return (p.luft_aufreisslaenge, 0.0, 0.1)
+        return None
+    _, tempo, dicke = best
+    q = tempo * dicke
+    h = 1.5 * (q * q / g) ** (1.0 / 3.0)
+    tu = q ** 0.43 / (14.95 * g ** 0.5 / (0.85 ** 1.22 * 1.85 ** 0.19))
+    fr2 = tempo * tempo / (g * dicke)
+    laenge = 1.05 * dicke * fr2 / (1.14 * tu * fr2) ** 0.82
+    if p.luft_aufreisslaenge > 0.0:
+        laenge = p.luft_aufreisslaenge
+    return (laenge, min(2.0 * h, 0.5 * laenge), dicke)
+
+
+def kaustik_schalten(scene, an):
+    """TRACED CAUSTICS: Cycles' shadow caustics (manifold next event
+    estimation, Blender 3.2+) find the light refracted by the water surface
+    onto the ground — from the simulated surface itself instead of a
+    pattern. The water casts, every other mesh receives, every light sends.
+    Only refraction caustics in shadows, no reflected ones."""
+    from ..sim import anzeige
+    for obj in scene.objects:
+        if obj.type == 'MESH' and hasattr(obj, "cycles"):
+            gischt = obj.name.startswith("HK_") and obj.name != anzeige.OBERFLAECHE
+            obj.cycles.is_caustics_caster = an and obj.name == anzeige.OBERFLAECHE
+            obj.cycles.is_caustics_receiver = an and obj.name != anzeige.OBERFLAECHE and not gischt
+        elif obj.type == 'LIGHT' and hasattr(obj.data, "cycles"):
+            obj.data.cycles.is_caustics_light = an
 
 
 # The scene's water settings a water material is built from. The material
@@ -107,7 +199,9 @@ KAUSTIK_NORMIERUNG = 1.0 / 0.0938
 # since Apply Water.
 WASSER_EINSTELLUNGEN = ("wasser_variante", "wasser_sichtweite", "wasser_geloest",
                         "wasser_kraeuselung", "wasser_schatten", "wasser_kaustik",
-                        "wasser_kaustik_groesse", "wasser_wellen", "wasser_dispersion")
+                        "wasser_kaustik_groesse", "wasser_wellen", "wasser_dispersion",
+                        "wasser_rauheit_wind", "wasser_kaustik_echt",
+                        "luft_an", "luft_aufreisslaenge")
 WASSER_STAND_KEY = "hk_wasser"
 
 
@@ -115,14 +209,23 @@ def wasser_aus_einstellungen(scene, variante=None):
     """The water material from the scene's water sliders."""
     p = scene.hydrokit
     fps = scene.render.fps / max(scene.render.fps_base, 1e-6)
-    mat = baue_wasser(variante or p.wasser_variante, p.wasser_kraeuselung,
+    # Traced caustics need real shadow rays through the surface: the shadow
+    # pass-through and its caustic pattern are left out then
+    echt = p.wasser_kaustik_echt
+    mat = baue_wasser(variante or p.wasser_variante, kraeuselung_wirksam(scene),
                       p.wasser_sichtweite, p.wasser_geloest,
-                      schatten=p.wasser_schatten, kaustik=p.wasser_kaustik,
+                      schatten=0.0 if echt else p.wasser_schatten,
+                      kaustik=0.0 if echt else p.wasser_kaustik,
                       kaustik_groesse=p.wasser_kaustik_groesse, wellen=p.wasser_wellen,
-                      dispersion=p.wasser_dispersion, fps=fps)
+                      dispersion=p.wasser_dispersion, fps=fps,
+                      luft=luft_kennwerte(scene) if p.luft_an else None)
     stand = {k: getattr(p, k) for k in WASSER_EINSTELLUNGEN}
     stand["wasser_variante"] = variante or p.wasser_variante
     stand["wasser_dispersion"] = int(p.wasser_dispersion)
+    stand["wasser_rauheit_wind"] = int(p.wasser_rauheit_wind)
+    stand["wasser_kaustik_echt"] = int(p.wasser_kaustik_echt)
+    stand["hk_rauheit"] = kraeuselung_wirksam(scene)
+    stand["luft_an"] = int(p.luft_an)
     mat[WASSER_STAND_KEY] = stand
     return mat
 
@@ -157,6 +260,11 @@ def wasser_stand(scene, flaeche):
             gleich = alt == jetzt
         if not gleich:
             offen.append(p.bl_rna.properties[k].name)
+    # the wind comes from force fields, not from a slider
+    if ("hk_rauheit" in gespeichert and not offen
+            and not math.isclose(float(gespeichert["hk_rauheit"]), kraeuselung_wirksam(scene),
+                                 rel_tol=1e-3, abs_tol=1e-6)):
+        offen.append("Wind")
     name = varianten[variante].name if variante in varianten.keys() else mat.name
     return name, offen
 
@@ -210,7 +318,7 @@ def volumen_strahlen(scene):
 
 def baue_wasser(variante='GEBIRGSBACH', kraeuselung=0.035, sichtweite=None, geloest=None,
                 schatten=1.0, kaustik=0.5, kaustik_groesse=0.15, wellen=1.0,
-                dispersion=False, fps=24.0):
+                dispersion=False, fps=24.0, luft=None):
     """Water material: a clear surface (IOR 1.333) over a volume that
     absorbs and scatters as measured (see wasser_optik). sichtweite and
     geloest default to the variant's values.
@@ -332,6 +440,51 @@ def baue_wasser(variante='GEBIRGSBACH', kraeuselung=0.035, sichtweite=None, gelo
         nt.links.new(oberflaeche, mischen.inputs[1])
         nt.links.new(klar.outputs["BSDF"], mischen.inputs[2])
         oberflaeche = mischen.outputs["Shader"]
+
+    if luft is not None:
+        # AERATED FALLING WATER (luft_kennwerte): fallen height from the
+        # vertex velocity, H = vz^2 / (2 g) for falling water; aeration grows
+        # with sqrt(H) from the onset to the breakup length, as the spread of
+        # the aerated layer does (Castillo). The aerated water is a layer of
+        # the jet's thickness with half air (Carrillo et al. 2020 measured 10
+        # to 90 % across the jet), its light by Kubelka-Munk as for foam.
+        from ..sim import aussehen as _aussehen
+        laenge, beginn, dicke = luft
+        zurueck, diffus, _ = _aussehen.schaum_schicht(_aussehen.schaum_optik(0.5),
+                                                     min(max(dicke, 0.01), 0.5))
+        tempo = nt.nodes.new("ShaderNodeAttribute"); tempo.location = (-780, 900)
+        tempo.attribute_name = "velocity"
+        teilen = nt.nodes.new("ShaderNodeSeparateXYZ"); teilen.location = (-600, 900)
+        nt.links.new(tempo.outputs["Vector"], teilen.inputs["Vector"])
+        fallend = nt.nodes.new("ShaderNodeMath"); fallend.location = (-440, 900)
+        fallend.operation = 'MINIMUM'
+        fallend.inputs[1].default_value = 0.0
+        nt.links.new(teilen.outputs["Z"], fallend.inputs[0])
+        hoehe = nt.nodes.new("ShaderNodeMath"); hoehe.location = (-280, 900)
+        hoehe.operation = 'MULTIPLY'
+        nt.links.new(fallend.outputs["Value"], hoehe.inputs[0])
+        nt.links.new(fallend.outputs["Value"], hoehe.inputs[1])
+        wurzel = nt.nodes.new("ShaderNodeMath"); wurzel.location = (-120, 900)
+        wurzel.operation = 'SQRT'
+        nt.links.new(hoehe.outputs["Value"], wurzel.inputs[0])
+        # sqrt(H) = |vz| / sqrt(2 g)
+        anteil = nt.nodes.new("ShaderNodeMapRange"); anteil.location = (60, 900)
+        anteil.clamp = True
+        anteil.inputs["From Min"].default_value = (2.0 * 9.81 * beginn) ** 0.5
+        anteil.inputs["From Max"].default_value = (2.0 * 9.81 * laenge) ** 0.5
+        nt.links.new(wurzel.outputs["Value"], anteil.inputs["Value"])
+        weiss = nt.nodes.new("ShaderNodeBsdfDiffuse"); weiss.location = (260, 1000)
+        weiss.inputs["Color"].default_value = (*zurueck, 1.0)
+        durch = nt.nodes.new("ShaderNodeBsdfTranslucent"); durch.location = (260, 860)
+        durch.inputs["Color"].default_value = (*diffus, 1.0)
+        schicht = nt.nodes.new("ShaderNodeAddShader"); schicht.location = (440, 940)
+        nt.links.new(weiss.outputs["BSDF"], schicht.inputs[0])
+        nt.links.new(durch.outputs["BSDF"], schicht.inputs[1])
+        belueftet = nt.nodes.new("ShaderNodeMixShader"); belueftet.location = (1100, 400)
+        nt.links.new(anteil.outputs["Result"], belueftet.inputs["Fac"])
+        nt.links.new(oberflaeche, belueftet.inputs[1])
+        nt.links.new(schicht.outputs["Shader"], belueftet.inputs[2])
+        oberflaeche = belueftet.outputs["Shader"]
 
     nt.links.new(oberflaeche, out.inputs["Surface"])
 

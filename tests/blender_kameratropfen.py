@@ -1224,7 +1224,8 @@ def netz_detail_test(hk):
            f"({n_leicht} instead of {n_voll} triangles)")
 
     info = cache.info_lesen(pfad) or {}
-    pruefe(info.get("netz") == {"detail": 2, "vorschau": "leicht", "viewport": 1}
+    pruefe({k: v for k, v in (info.get("netz") or {}).items() if k != "tempo"}
+           == {"detail": 2, "vorschau": "leicht", "viewport": 1}
            and info.get("dauer", 0) > 0,
            f"the cache records which second mesh it holds: {info.get('netz')}, "
            f"and how long the bake took: {info.get('dauer')} s")
@@ -1452,6 +1453,148 @@ def turbulenz_test(hk):
            f"({aus[3]} / {an[3]} particles)")
     pruefe(abs(an[2] / aus[2] - 1.0) < 0.1,
            f"the inflow delivers about the same water: {aus[2]} -> {an[2]} particles")
+
+
+# ------------------------------------------------------ measured materials
+@abschnitt("Measured materials: wind, foam, caustics, wet obstacles")
+def material_mess_test(hk):
+    """Ripples From Wind (Cox & Munk 1954), foam brightness against field
+    measurements, traced caustics and wet obstacles (Lekner & Dorf 1988)."""
+    from importlib import import_module
+    mo = import_module(hk.__name__ + ".operators.materials_ops")
+    aussehen = import_module(hk.__name__ + ".sim.aussehen")
+    backen = import_module(hk.__name__ + ".sim.backen")
+    nass = import_module(hk.__name__ + ".sim.nass")
+    scene = bpy.context.scene
+    sh = scene.hydrokit
+
+    # M1: 5 m/s of wind -> 0.40; calm keeps the Ripples value
+    werte = [round(mo.wind_rauheit(u), 2) for u in (0.0, 2.0, 5.0, 10.0)]
+    bpy.ops.object.effector_add(type='WIND', location=(0.0, 0.0, 0.0))
+    wind = bpy.context.active_object
+    wind.field.strength = 0.0
+    ruhig = mo.kraeuselung_wirksam(scene)
+    wind.field.strength = 5.0
+    windig = mo.kraeuselung_wirksam(scene)
+    sh.wasser_rauheit_wind = False
+    aus = mo.kraeuselung_wirksam(scene)
+    sh.wasser_rauheit_wind = True
+    bpy.data.objects.remove(wind)
+    pruefe(werte == [0.0, 0.32, 0.4, 0.48] and ruhig == sh.wasser_kraeuselung
+           and abs(windig - 0.40) < 0.01 and aus == sh.wasser_kraeuselung,
+           f"roughness from the wind {werte}; calm {ruhig:.3f}, 5 m/s {windig:.3f}, switched off {aus:.3f}")
+
+    # M2: a foam particle (default radius 1 cm, 20 % air) reflects within the
+    # measured 22-55 % (Koepke 1984 effective, Whitlock 1982 fresh foam);
+    # mean chord of a sphere 4 r / 3
+    zurueck, _, _ = aussehen.schaum_schicht(aussehen.schaum_optik(0.2), 4.0 * 0.01 / 3.0)
+    pruefe(all(0.22 <= r <= 0.55 for r in zurueck),
+           f"a foam particle reflects {[round(r, 2) for r in zurueck]} (measured 0.22-0.55)")
+
+    # M3: traced caustics mark caster, receivers and lights, and leave the
+    # shadow pass-through out of the material
+    bpy.ops.object.light_add(type='SUN')
+    sonne = bpy.context.active_object
+    sh.wasser_kaustik_echt = True
+    aussehen.wasser_anwenden(bpy.context)
+    flaeche = bpy.data.objects.get("HK_Oberflaeche")
+    boden = bpy.data.objects["Cube"]
+    mat = flaeche.data.materials[0] if flaeche is not None and flaeche.data.materials else None
+    ohne_trick = mat is not None and not any(k.type == 'LIGHT_PATH' for k in mat.node_tree.nodes)
+    markiert = (flaeche is not None and flaeche.cycles.is_caustics_caster
+                and boden.cycles.is_caustics_receiver and sonne.data.cycles.is_caustics_light)
+    sh.wasser_kaustik_echt = False
+    aussehen.wasser_anwenden(bpy.context)
+    zurueck_aus = (flaeche is not None and not flaeche.cycles.is_caustics_caster
+                   and not sonne.data.cycles.is_caustics_light)
+    bpy.data.objects.remove(sonne)
+    pruefe(markiert and ohne_trick and zurueck_aus,
+           f"traced caustics: marked {markiert}, no shadow pass-through {ohne_trick}, off again {zurueck_aus}")
+
+    # M4: water falling on an obstacle wets it from a later frame on, the
+    # material gets the group, and switched off it is as before
+    d = boden.hydrokit
+    d.cache_pfad = os.path.join(ARBEIT, "cache_nass")
+    bpy.ops.mesh.primitive_cube_add(size=0.6, location=(0.0, 0.0, -0.65))
+    stein = bpy.context.active_object
+    stein.hydrokit.typ = 'OBSTACLE'
+    stoff = bpy.data.materials.new("Test Stein"); stoff.use_nodes = True
+    bsdf = next(k for k in stoff.node_tree.nodes if k.type == 'BSDF_PRINCIPLED')
+    bsdf.inputs["Base Color"].default_value = (0.3, 0.3, 0.3, 1.0)
+    stein.data.materials.append(stoff)
+    bpy.ops.mesh.primitive_cube_add(size=0.2, location=(0.0, 0.0, 0.5))
+    zu = bpy.context.active_object
+    zu.hydrokit.typ = 'INFLOW'
+    zu.hydrokit.zufluss_geschwindigkeit = (0.0, 0.0, -2.0)
+    scene.frame_start, scene.frame_end = 1, 12
+    try:
+        n, dauer, fehler = backen.backen(scene)
+        sh.nass_an = True
+        ergebnis = dict(nass.berechnen(scene))
+        dg = bpy.context.evaluated_depsgraph_get()
+        ev = stein.evaluated_get(dg)
+        me = ev.to_mesh()
+        attr = me.attributes.get(nass.ATTRIBUT)
+        werte = [v.value for v in attr.data] if attr is not None else []
+        ev.to_mesh_clear()
+        nass_ab = [v for v in werte if v > 0]
+        gruppe = any(k.type == 'GROUP' and k.name.startswith(nass.KNOTEN) for k in stoff.node_tree.nodes)
+        film = bsdf.inputs["Coat IOR"].default_value
+        # Aerated Falling Water: the bake wrote the surface velocities, the
+        # display hands them to the water, the material reads them
+        pfad = os.path.join(ARBEIT, "cache_nass")
+        tempo_datei = os.path.isfile(os.path.join(pfad, "frames", "tempo000012.bobj"))
+        scene.frame_set(11); scene.frame_set(12)
+        flaeche = bpy.data.objects.get("HK_Oberflaeche")
+        v_attr = flaeche.data.attributes.get("velocity") if flaeche else None
+        fallend = 0
+        if v_attr is not None and len(v_attr.data):
+            vz = [v.vector[2] for v in v_attr.data]
+            fallend = sum(1 for z in vz if z < -1.0)
+        aussehen.wasser_anwenden(bpy.context)
+        liest = any(k.type == 'ATTRIBUTE' and k.attribute_name == "velocity"
+                    for k in flaeche.data.materials[0].node_tree.nodes) if flaeche else False
+        sh.nass_an = False
+        sauber = (not any(k.type == 'GROUP' for k in stoff.node_tree.nodes)
+                  and not bsdf.inputs["Base Color"].links
+                  and abs(bsdf.inputs["Base Color"].default_value[0] - 0.3) < 1e-6
+                  and stein.modifiers.get(nass.GN_MOD) is None
+                  and bpy.data.objects.get(nass.PUNKTE) is None)
+    finally:
+        bpy.data.objects.remove(zu)
+        bpy.data.objects.remove(stein)
+    pruefe(fehler is None and nass_ab and min(nass_ab) > 1 and len(werte) > 8,
+           f"water wets the obstacle box: {len(nass_ab)} of {len(werte)} points of the subdivided "
+           f"8-corner box, first from frame {min(nass_ab) if nass_ab else None} ({ergebnis})")
+    pruefe(gruppe and abs(film - 1.333) < 1e-6 and sauber,
+           f"wet material: group in {gruppe}, film IOR {film:.3f}; switched off as before {sauber}")
+    pruefe(tempo_datei and fallend > 0 and liest,
+           f"aerated water: velocities baked {tempo_datei}, {fallend} falling vertices on display, "
+           f"material reads them {liest}")
+
+    # Breakup length from an inflow like the learning scene's (2.5 m/s,
+    # 0.5 m thick, 1.4 m wide): 11.4 m, white from 1.6 m
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0.0, 0.0, 0.5))
+    zu = bpy.context.active_object
+    zu.scale = (0.4, 1.4, 0.5)
+    zu.hydrokit.typ = 'INFLOW'
+    zu.hydrokit.zufluss_geschwindigkeit = (2.5, 0.0, 0.0)
+    bpy.context.view_layer.update()
+    kennwerte = mo.luft_kennwerte(scene)
+    bpy.data.objects.remove(zu)
+    pruefe(kennwerte is not None and abs(kennwerte[0] - 11.4) < 0.2 and abs(kennwerte[1] - 1.63) < 0.05,
+           f"breakup length and onset from the inflow: {kennwerte}")
+
+    # Rainbows: one smooth glass per colour channel with water's index;
+    # ageing foam: fades with exp(-age / decay)
+    regen = aussehen.baue_gischt_material("spray", dispersion=True)
+    iors = sorted(round(k.inputs["IOR"].default_value, 5) for k in regen.node_tree.nodes
+                  if k.type == 'BSDF_GLASS')
+    schaum = aussehen.baue_gischt_material("foam", zerfall=3.0)
+    altert = (any(k.type == 'ATTRIBUTE' and k.attribute_name == "hk_alter" for k in schaum.node_tree.nodes)
+              and any(k.type == 'MATH' and k.operation == 'EXPONENT' for k in schaum.node_tree.nodes))
+    pruefe(iors == sorted(round(x, 5) for x in mo.WASSER_IOR_RGB) and altert,
+           f"rainbow spray: glass per channel {iors}; foam ages {altert}")
 
 
 # ------------------------------------------------------- Light Playback
@@ -3740,6 +3883,7 @@ def main():
         netz_detail_test(hk)
         aniso_netz_test(hk)
         turbulenz_test(hk)
+        material_mess_test(hk)
         abspielen_test(hk)
         abspielen_zusammen_test(hk)
         abspielen_undo_test(hk)

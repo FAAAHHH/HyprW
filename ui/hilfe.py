@@ -335,6 +335,73 @@ HILFE = {
                       "tension 72.75 mN/m at 20 °C, Vargaftik et al. 1983). They move with the "
                       "scene time. 1 = 0.5 mm height (APPROXIMATION).",
                       WASSER),
+    "wasser_rauheit_wind": ("Ripples From Wind",
+                            "Wind roughens the water surface; this takes the roughness from "
+                            "the wind of the scene's force fields.",
+                            "On by default. Without wind the Ripples value stays; with wind "
+                            "the surface gets rougher as measured, and its reflections blur. "
+                            "Press Apply Water after changing the wind.",
+                            "Cox & Munk 1954 (sun glitter photographed from aircraft): mean "
+                            "square slope 0.003 + 5.12e-3 U, U the wind at 10 m in m/s. "
+                            "HyprW takes the wind term (the constant is swell, within the "
+                            "error), GGX alpha = sqrt(slope variance), roughness = sqrt(alpha): "
+                            "2 m/s 0.32, 5 m/s 0.40, 10 m/s 0.48. APPROXIMATION: measured on "
+                            "the open sea, Beckmann and GGX taken as equal, the wind near the "
+                            "water taken as the wind at 10 m.",
+                            WASSER),
+    "wasser_kaustik_echt": ("Traced Caustics",
+                            "Cycles traces the bright network the waves throw onto the "
+                            "ground, from the simulated surface itself.",
+                            "Switch it on and press Apply Water. It replaces Light Through "
+                            "Surface and the caustic pattern, and renders slower. Only "
+                            "Cycles; light refracted by the water, not reflected by it.",
+                            "Cycles' Shadow Caustics (manifold next event estimation, "
+                            "Blender 3.2): the water surface is marked as caster, every "
+                            "other mesh as receiver, every light as caustic light. Measured "
+                            "on a closed 20 cm water body over sand (Blender 5.3): the "
+                            "network's contrast 0.13 against 0.07 path-traced, but the "
+                            "floor 31 % darker on average — the method is approximate and "
+                            "loses light where it finds no path. Needs a closed water body, "
+                            "as the simulation makes it.",
+                            WASSER),
+    "luft_an": ("Aerated Falling Water",
+                "Falling water takes up air and turns white; the further it falls, the "
+                "whiter, fully white at its breakup length.",
+                "On by default; takes effect with the next bake (it writes the surface "
+                "velocities) and Apply Water. Breakup sets the fall height of full "
+                "whiteness; 0 computes it from the largest inflow. Short falls with much "
+                "water stay clear, as in nature.",
+                "Fallen height from the vertex velocity, H = vz^2 / 2g. White share grows "
+                "with sqrt(H) from the onset 2h (Castillo; h = 1.5 critical depth) to the "
+                "breakup length L = 1.05 B Fr^2 / (1.14 Tu Fr^2)^0.82 (Ervine et al. 1997, "
+                "round jets, here with the jet thickness B — APPROXIMATION), Tu = "
+                "q^0.43 / IC at the edge (Carrillo et al. 2020). The aerated layer: half "
+                "air (measured 10-90 % across falling jets), light by Kubelka-Munk. "
+                "Learning scene: white from 1.6 m, fully at 11.4 m — its 2 m fall stays "
+                "almost clear.",
+                BAKE),
+    "luft_aufreisslaenge": ("Breakup Length",
+                            "Fall height after which falling water is fully white.",
+                            "0 computes it from the largest inflow. Set it for scenes "
+                            "without inflow, or to match a real fall you know.",
+                            "Fully aerated where no clear core is left (Ervine et al. 1997).",
+                            WASSER),
+    "nass_an": ("Wet Obstacles",
+                "Rocks and banks the water has touched turn darker and get a thin water "
+                "film, from the frame the water reaches them.",
+                "Switch it on after a bake; it follows every new bake by itself. It puts a "
+                "node group in front of the Principled BSDF of the obstacles' materials; "
+                "switched off, the materials are as before. Works for stone, soil and wood, "
+                "not for paper or cloth.",
+                "Lekner & Dorf 1988 (Applied Optics 27:1278): under a water film the "
+                "albedo c becomes c (1 - p) / (1 - p c), p = 1 - (1 - R) / n^2 = 0.475 "
+                "for water, R = 0.066 its Fresnel reflectance for diffuse light. 0.3 "
+                "becomes 0.18. The film: Principled coat with IOR 1.333. Wet where the "
+                "water mesh comes within about one simulation cell (APPROXIMATION), "
+                "wet from then on; spray does not wet. Measured on points half a cell "
+                "apart over the surfaces; a modifier subdivides coarse obstacles (up to "
+                "6 levels) and takes the wetness from them.",
+                JETZT),
     "wasser_dispersion": ("Dispersion",
                           "Splits light into its colours like a prism, for a faint rainbow edge.",
                           "Leave it off unless you render close-ups of clear water: it is barely "
@@ -384,6 +451,15 @@ HILFE = {
                       "bubbles (0.1 mm to a few mm, Deane & Stokes 2002) are far smaller than the "
                       "drawn particles.",
                       JETZT),
+    "schaum_zerfall": ("Foam Decay",
+                       "Foam thins out as it ages instead of vanishing at once.",
+                       "3 s is the middle of the sea measurements; less for clean water, "
+                       "more for water with soap-like matter (it stabilises foam). 0 "
+                       "switches it off.",
+                       "Each foam particle fades as exp(-age / decay). Callaghan et al. 2012 "
+                       "(552 breaking waves): single patches 0.2-10.4 s, area-weighted "
+                       "1.4-4.8 s. The age is the lifetime minus what is left of it.",
+                       JETZT),
     "schaum_luftanteil": ("Air in Foam",
                           "How much air is mixed into the foam. More air looks denser and "
                           "whiter, less looks clearer and more like milky water.",
