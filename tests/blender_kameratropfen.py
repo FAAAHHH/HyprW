@@ -1405,6 +1405,55 @@ def aniso_netz_test(hk):
            f"bake status lists the switch and the smoothness: {glatt}, {aus}")
 
 
+# ------------------------------------------------------ inflow turbulence
+@abschnitt("Inflow turbulence")
+def turbulenz_test(hk):
+    """An inflow with turbulence (engine_patch/README.md section 13): the water
+    leaving it swirls sideways, and the inflow delivers about the same amount
+    of water. (Bakes with an inflow differ by the engine's random jitter, so
+    the swirl is measured in the particle velocities, not by comparing
+    meshes.)"""
+    from importlib import import_module
+    import json
+    import numpy as np
+    backen = import_module(hk.__name__ + ".sim.backen")
+    cache = import_module(hk.__name__ + ".sim.cache")
+    pruefe(backen.engine_erweiterungen().get("turbulenz") is True,
+           "the engine has inflow turbulence")
+    scene = bpy.context.scene
+    d = bpy.data.objects["Cube"].hydrokit
+    d.netz_anisotrop = False
+    bpy.ops.mesh.primitive_cube_add(size=0.2, location=(0.0, 0.0, 0.5))
+    zu = bpy.context.active_object
+    zu.hydrokit.typ = 'INFLOW'
+    zu.hydrokit.zufluss_geschwindigkeit = (1.5, 0.0, 0.0)
+    scene.frame_start, scene.frame_end = 1, 6
+    ergebnis = {}
+    try:
+        for name, prozent in (("aus", 0.0), ("an", 25.0)):
+            zu.hydrokit.zufluss_turbulenz = prozent
+            d.cache_pfad = os.path.join(ARBEIT, "cache_turbulenz_" + name)
+            pfad = cache.pfad_aufloesen(d.cache_pfad)
+            n, dauer, fehler = backen.backen(scene)
+            stand = os.path.join(pfad, "zwischenstand")
+            with open(os.path.join(stand, "info.json")) as f:
+                wasser = json.load(f)["wasser"]
+            vel = np.fromfile(os.path.join(stand, "marker_velocity.data"), np.float32).reshape(-1, 3)
+            # water from the inflow: fast along +x; its sideways spread (y,
+            # untouched by gravity) is the turbulence
+            schnell = vel[vel[:, 0] > 0.75]
+            quer = float(np.sqrt(np.mean(schnell[:, 1] ** 2))) if len(schnell) else 0.0
+            ergebnis[name] = (fehler, quer, wasser, len(schnell))
+    finally:
+        bpy.data.objects.remove(zu)
+    aus, an = ergebnis["aus"], ergebnis["an"]
+    pruefe(aus[0] is None and an[0] is None and an[3] > 0 and an[1] > 3.0 * aus[1] + 0.05,
+           f"25 % turbulence: sideways RMS of the inflow water {aus[1]:.3f} -> {an[1]:.3f} m/s "
+           f"({aus[3]} / {an[3]} particles)")
+    pruefe(abs(an[2] / aus[2] - 1.0) < 0.1,
+           f"the inflow delivers about the same water: {aus[2]} -> {an[2]} particles")
+
+
 # ------------------------------------------------------- Light Playback
 def _anzeige_stand(anzeige):
     """Everything the display objects hold, per object: counts, positions,
@@ -3690,6 +3739,7 @@ def main():
         bake_test(hk)
         netz_detail_test(hk)
         aniso_netz_test(hk)
+        turbulenz_test(hk)
         abspielen_test(hk)
         abspielen_zusammen_test(hk)
         abspielen_undo_test(hk)

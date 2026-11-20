@@ -49,6 +49,34 @@ HILFE = {
                                 "0 almost nothing comes out.",
                                 "Flow rate = velocity x cross-section of the inflow.",
                                 BAKE),
+    "zufluss_turbulenz": ("Inflow Turbulence",
+                          "Makes the inflowing water swirl like a real river instead of "
+                          "leaving the inflow as one smooth, rigid slab.",
+                          "10 % is a typical river. Raise it for a wild mountain stream, "
+                          "lower it for calm, clear water; 0 switches it off. Eddies sets the "
+                          "size of the largest swirls; 0 takes the inflow's thinnest side. "
+                          "Needs Constrain Velocity.",
+                          "Nezu (1977), open channels: u'/u* = 2.3 exp(-y/h) along the flow "
+                          "(1.27 vertical, 1.63 across). With u*/U = 0.05-0.1 that gives 7-15 % "
+                          "of the mean speed over the depth (APPROXIMATION: the u*/U range of "
+                          "rivers and one isotropic field for all three directions). The field "
+                          "is a sum of 32 random Fourier modes (Kraichnan 1970) with a "
+                          "Kolmogorov -5/3 spectrum, divergence-free, carried with the inflow "
+                          "velocity (Taylor 1938). Measured: 9.5-10.4 % per direction at 10 %. "
+                          "Inside the inflow the water keeps the mean velocity, so the flow rate "
+                          "stays; each particle leaving through the outlet gets the turbulent "
+                          "velocity on top of its own. Learning scene without outflow, 24 "
+                          "frames: +0.4 % water delivered at 10 %, +7 % at 25 % (smaller time "
+                          "steps alone add about 1.7 %).",
+                          BAKE),
+    "zufluss_wirbel": ("Eddy Size",
+                       "How large the largest swirls in the inflowing water are.",
+                       "0 picks the inflow's thinnest side automatically, like a river whose "
+                       "largest eddies are about as large as it is deep. Below two "
+                       "simulation cells the swirls are too small for the grid.",
+                       "The largest wavelength of the turbulence; the field reaches down to "
+                       "a quarter of it.",
+                       BAKE),
     "zufluss_erzwingen": ("Constrain Velocity",
                           "Forces the water inside the inflow to exactly the velocity above, so "
                           "the stream is steady and predictable.",

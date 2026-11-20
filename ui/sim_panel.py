@@ -300,6 +300,14 @@ class HYDROKIT_PT_sim(bpy.types.Panel):
         spalte.enabled = h.rolle_aktiv
         if aktuell == 'INFLOW':
             _regler(spalte, h, "zufluss_geschwindigkeit")
+            wirbel = spalte.row(align=True)
+            wirbel.enabled = (backen.engine_erweiterungen().get("turbulenz", False)
+                              and h.zufluss_erzwingen)
+            wirbel.prop(h, "zufluss_turbulenz")
+            groesse = wirbel.row(align=True)
+            groesse.enabled = h.zufluss_turbulenz > 0.0
+            groesse.prop(h, "zufluss_wirbel", text="Eddies")
+            _hilfe(wirbel, "zufluss_turbulenz")
             _regler(spalte, h, "zufluss_erzwingen")
             _regler(spalte, h, "zufluss_substeps")
             if h.zufluss_erzwingen and not any(h.zufluss_geschwindigkeit):

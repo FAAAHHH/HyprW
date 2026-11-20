@@ -185,6 +185,12 @@ class MeshFluidSource():
         cvect = pb.execute_lib_func(libfunc, [self()])
         return Vector3.from_struct(cvect)
 
+    def set_turbulence(self, intensity, length, seed=0):
+        """HydroKit: turbulence of the inflowing water (meshfluidsource.h)."""
+        libfunc = lib.MeshFluidSource_set_turbulence
+        pb.init_lib_func(libfunc, [c_void_p, c_double, c_double, c_double, c_void_p], None)
+        pb.execute_lib_func(libfunc, [self(), intensity, length, float(seed)])
+
     @decorators.xyz_or_vector
     def set_velocity(self, vx, vy, vz):
         libfunc = lib.MeshFluidSource_set_velocity

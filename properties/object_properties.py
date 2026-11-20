@@ -957,6 +957,28 @@ class HydroKitObjectProperties(bpy.types.PropertyGroup):
                      "inflow's size it sets how much water flows. With 0 almost nothing "
                      "leaves the inflow"),
     )
+    # INFLOW TURBULENCE (engine_patch/README.md section 13). Rivers are
+    # turbulent: Nezu (1977) measured u'/u* = 2.3 exp(-y/h) along the flow
+    # (1.27 vertical, 1.63 across) in open channels; with u*/U = 0.05-0.1 that
+    # is 7-15 % of the mean speed over the depth. An inflow without it emits a
+    # perfectly smooth slab of water that stays smooth: the "rigid" look.
+    # Measured on the learning scene without its outflow, 24 frames: the
+    # inflow delivers +0.4 % water at 10 %, +7 % at 25 % (of which smaller
+    # time steps alone account for about 1.7 %).
+    zufluss_turbulenz: bpy.props.FloatProperty(
+        name="Turbulence", default=10.0, min=0.0, max=50.0, soft_max=30.0,
+        subtype='PERCENTAGE', precision=1,
+        description=("How strongly the inflowing water swirls: the typical velocity "
+                     "fluctuation as a share of the inflow speed. Rivers: about 7-15 %. "
+                     "0 = perfectly smooth inflow (HyprW 1.2 and older). Needs Constrain "
+                     "Velocity"),
+    )
+    zufluss_wirbel: bpy.props.FloatProperty(
+        name="Eddy Size", default=0.0, min=0.0, soft_max=5.0, subtype='DISTANCE',
+        description=("Size of the largest eddies in the inflowing water. 0 = automatic: "
+                     "the inflow's thinnest side, as a river's largest eddies are about "
+                     "as large as it is deep"),
+    )
     zufluss_erzwingen: bpy.props.BoolProperty(
         name="Constrain Velocity", default=True,
         description=("Water inside the inflow is forced to the velocity above, giving a "

@@ -581,6 +581,25 @@ index 0000000..2ef2e7d
 +        return (double)HKGPU::getVerifyCompared(step);
 +    }
 +}
+diff --git a/src/engine/c_bindings/meshfluidsource_c.cpp b/src/engine/c_bindings/meshfluidsource_c.cpp
+index bc271a0..f38a422 100644
+--- a/src/engine/c_bindings/meshfluidsource_c.cpp
++++ b/src/engine/c_bindings/meshfluidsource_c.cpp
+@@ -223,6 +223,14 @@ extern "C" {
+         );
+     }
+ 
++    EXPORTDLL void MeshFluidSource_set_turbulence(MeshFluidSource* obj,
++                                                  double intensity, double length, double seed,
++                                                  int *err) {
++        CBindings::safe_execute_method_void_3param(
++            obj, &MeshFluidSource::setTurbulence, intensity, length, seed, err
++        );
++    }
++
+     EXPORTDLL void MeshFluidSource_enable_append_object_velocity(MeshFluidSource* obj, int *err) {
+         CBindings::safe_execute_method_void_0param(
+             obj, &MeshFluidSource::enableAppendObjectVelocity, err
 diff --git a/src/engine/diffuseparticlesimulation.cpp b/src/engine/diffuseparticlesimulation.cpp
 index 579064e..c59b18e 100644
 --- a/src/engine/diffuseparticlesimulation.cpp
@@ -1698,8 +1717,25 @@ index 0000000..baa5627
 +    nummer = SCHRITTE[step]
 +    return (_call("HKGPU_get_verify_gpu_time", [c_int], c_double, [nummer]),
 +            _call("HKGPU_get_verify_cpu_time", [c_int], c_double, [nummer]))
+diff --git a/src/engine/ffengine/meshfluidsource.py b/src/engine/ffengine/meshfluidsource.py
+index 809c8d3..88cc3bf 100644
+--- a/src/engine/ffengine/meshfluidsource.py
++++ b/src/engine/ffengine/meshfluidsource.py
+@@ -185,6 +185,12 @@ class MeshFluidSource():
+         cvect = pb.execute_lib_func(libfunc, [self()])
+         return Vector3.from_struct(cvect)
+ 
++    def set_turbulence(self, intensity, length, seed=0):
++        """HydroKit: turbulence of the inflowing water (meshfluidsource.h)."""
++        libfunc = lib.MeshFluidSource_set_turbulence
++        pb.init_lib_func(libfunc, [c_void_p, c_double, c_double, c_double, c_void_p], None)
++        pb.execute_lib_func(libfunc, [self(), intensity, length, float(seed)])
++
+     @decorators.xyz_or_vector
+     def set_velocity(self, vx, vy, vz):
+         libfunc = lib.MeshFluidSource_set_velocity
 diff --git a/src/engine/fluidsimulation.cpp b/src/engine/fluidsimulation.cpp
-index 10989a7..b583683 100644
+index 10989a7..a1d78c7 100644
 --- a/src/engine/fluidsimulation.cpp
 +++ b/src/engine/fluidsimulation.cpp
 @@ -23,6 +23,7 @@ SOFTWARE.
@@ -3114,7 +3150,52 @@ index 10989a7..b583683 100644
  
          params.velocityFieldFluid = &_MACVelocity;
          params.velocityFieldSolid = &(_solidSDF.getVelocityDataGrid()->field);
-@@ -7599,8 +8892,13 @@ void FluidSimulation::_updateMarkerParticleSourceIDAttributeGrid(ParticleSystem
+@@ -7328,6 +8621,22 @@ void FluidSimulation::_constrainMarkerParticleVelocities(MeshFluidSource *inflow
+         isInflowCell.fill(false);
+         isInflowCell.set(inflowCells, true);
+ 
++        // HydroKit: the cells just outside the inflow where its turbulence
++        // is given to the leaving water (getOutletTurbulentVelocity)
++        bool turbulent = subidx == 0 && inflow->getTurbulenceIntensity() > 0.0 &&
++                         !inflow->isAppendObjectVelocityEnabled() && !inflowCells.empty();
++        GridIndex tmin = turbulent ? inflowCells[0] : GridIndex();
++        GridIndex tmax = tmin;
++        for (size_t c = 0; turbulent && c < inflowCells.size(); c++) {
++            tmin.i = std::min(tmin.i, inflowCells[c].i - 3);
++            tmin.j = std::min(tmin.j, inflowCells[c].j - 3);
++            tmin.k = std::min(tmin.k, inflowCells[c].k - 3);
++            tmax.i = std::max(tmax.i, inflowCells[c].i + 3);
++            tmax.j = std::max(tmax.j, inflowCells[c].j + 3);
++            tmax.k = std::max(tmax.k, inflowCells[c].k + 3);
++        }
++        double time = ((double)_currentFrame + frameInterpolation) * _currentFrameDeltaTime;
++
+         std::vector<vmath::vec3> *positions, *velocities;
+         _markerParticles.getAttributeValues("POSITION", positions);
+         _markerParticles.getAttributeValues("VELOCITY", velocities);
+@@ -7339,13 +8648,17 @@ void FluidSimulation::_constrainMarkerParticleVelocities(MeshFluidSource *inflow
+         for (size_t i = 0; i < positions->size(); i++) {
+             vmath::vec3 p = positions->at(i);
+             GridIndex g = Grid3d::positionToGridIndex(p, _dx);
+-            if (!isInflowCell(g)) {
++            if (!isInflowCell(g) || inflowSDF->trilinearInterpolate(p) > 0.0f) {
++                vmath::vec3 kick;
++                if (turbulent && g.i >= tmin.i && g.j >= tmin.j && g.k >= tmin.k &&
++                        g.i <= tmax.i && g.j <= tmax.j && g.k <= tmax.k &&
++                        inflow->getOutletTurbulenceKick(p, velocities->at(i), time,
++                                                        _currentFrameTimeStep, kick)) {
++                    velocities->at(i) = velocities->at(i) + kick;
++                }
+                 continue;
+             }
+ 
+-            if (inflowSDF->trilinearInterpolate(p) > 0.0f) {
+-                continue;
+-            }
+ 
+             if (inflow->isAppendObjectVelocityEnabled()) {
+                 if (inflow->isRigidBody()) {
+@@ -7599,8 +8912,13 @@ void FluidSimulation::_updateMarkerParticleSourceIDAttributeGrid(ParticleSystem
          indices[i] = i;
      }
  
@@ -3130,7 +3211,30 @@ index 10989a7..b583683 100644
      std::shuffle(indices.begin(), indices.end(), g);
      
      std::vector<vmath::vec3> positionsRandom(indices.size());
-@@ -8993,6 +10291,8 @@ void FluidSimulation::_updateInflowMeshFluidSources() {
+@@ -8478,7 +9796,9 @@ void FluidSimulation::_addNewFluidCells(std::vector<GridIndex> &cells,
+                                         MeshLevelSet &meshSDF,
+                                         vmath::vec3 sdfoffset,
+                                         MarkerParticleAttributes attributes,
+-                                        ParticleMaskGrid &maskgrid) {
++                                        ParticleMaskGrid &maskgrid,
++                                        MeshFluidSource *turbulentSource,
++                                        double time) {
+ 
+     int numCPU = ThreadUtils::getMaxThreadCount();
+     int numthreads = (int)fmin(numCPU, cells.size());
+@@ -8504,7 +9824,10 @@ void FluidSimulation::_addNewFluidCells(std::vector<GridIndex> &cells,
+                 continue;
+             }
+ 
+-            newParticles.push_back(MarkerParticle(p, velocity));
++            // HydroKit: inflow turbulence (MeshFluidSource::setTurbulence)
++            vmath::vec3 pv = turbulentSource != nullptr ?
++                             turbulentSource->getTurbulentVelocity(p, time) : velocity;
++            newParticles.push_back(MarkerParticle(p, pv));
+             maskgrid.addParticle(p);
+         }
+     }
+@@ -8993,6 +10316,8 @@ void FluidSimulation::_updateInflowMeshFluidSources() {
          maskgrid.addParticle(positions->at(i));
      }
  
@@ -3139,7 +3243,7 @@ index 10989a7..b583683 100644
      for (size_t i = 0; i < _meshFluidSources.size(); i++) {
          if (_meshFluidSources[i]->isInflow()) {
              _updateInflowMeshFluidSource(_meshFluidSources[i], maskgrid);
-@@ -9078,6 +10378,7 @@ void FluidSimulation::_updateAddedFluidMeshObjectQueue() {
+@@ -9078,6 +10403,7 @@ void FluidSimulation::_updateAddedFluidMeshObjectQueue() {
      for (unsigned int i = 0; i < positions->size(); i++) {
          maskgrid.addParticle(positions->at(i));
      }
@@ -3147,7 +3251,7 @@ index 10989a7..b583683 100644
  
      MeshLevelSet meshSDF(_isize, _jsize, _ksize, _dx);
      meshSDF.disableVelocityData();
-@@ -9269,10 +10570,64 @@ std::string FluidSimulation::_getFrameString(int number) {
+@@ -9269,10 +10595,64 @@ std::string FluidSimulation::_getFrameString(int number) {
  }
  
  void FluidSimulation::_smoothSurfaceMesh(TriangleMesh &mesh) {
@@ -3212,7 +3316,7 @@ index 10989a7..b583683 100644
  void FluidSimulation::_invertContactNormals(TriangleMesh &mesh) {
      if (!_isInvertedContactNormalsEnabled) {
          return;
-@@ -9429,10 +10784,23 @@ void FluidSimulation::_computeDomainBoundarySDF(MeshLevelSet *sdf) {
+@@ -9429,10 +10809,23 @@ void FluidSimulation::_computeDomainBoundarySDF(MeshLevelSet *sdf) {
  
  void FluidSimulation::_generateOutputSurface(TriangleMesh &surface, TriangleMesh &preview,
                                                 std::vector<vmath::vec3> *particles,
@@ -3237,7 +3341,7 @@ index 10989a7..b583683 100644
  
      if (_markerParticles.empty()) {
          surface = TriangleMesh();
-@@ -9480,9 +10848,18 @@ void FluidSimulation::_generateOutputSurface(TriangleMesh &surface, TriangleMesh
+@@ -9480,9 +10873,18 @@ void FluidSimulation::_generateOutputSurface(TriangleMesh &surface, TriangleMesh
      if (_isPreviewSurfaceMeshEnabled) {
          params.previewdx = _previewdx;
      }
@@ -3256,7 +3360,7 @@ index 10989a7..b583683 100644
      if (_isPreviewSurfaceMeshEnabled) {
          preview = mesher.getPreviewMesh();
      }
-@@ -9938,11 +11315,13 @@ void FluidSimulation::_generateSurfaceDensityAttributeData(TriangleMesh &surface
+@@ -9938,11 +11340,13 @@ void FluidSimulation::_generateSurfaceDensityAttributeData(TriangleMesh &surface
  }
  
  void FluidSimulation::_outputSurfaceMeshThread(std::vector<vmath::vec3> *particles,
@@ -3274,7 +3378,7 @@ index 10989a7..b583683 100644
      }
  
      _logfile.logString(_logfile.getTime() + " BEGIN       Generate Surface Mesh");
-@@ -9956,9 +11335,10 @@ void FluidSimulation::_outputSurfaceMeshThread(std::vector<vmath::vec3> *particl
+@@ -9956,9 +11360,10 @@ void FluidSimulation::_outputSurfaceMeshThread(std::vector<vmath::vec3> *particl
      }
  
      TriangleMesh surfacemesh, previewmesh;
@@ -3286,7 +3390,7 @@ index 10989a7..b583683 100644
  
      _generateSurfaceMotionBlurData(surfacemesh, vfield);
      _generateSurfaceVelocityAttributeData(surfacemesh, vfield);
-@@ -10021,9 +11401,18 @@ void FluidSimulation::_launchOutputSurfaceMeshThread() {
+@@ -10021,9 +11426,18 @@ void FluidSimulation::_launchOutputSurfaceMeshThread() {
  
      // Particles will be deleted within the thread after use
      std::vector<vmath::vec3> *particles = new std::vector<vmath::vec3>();
@@ -3308,7 +3412,7 @@ index 10989a7..b583683 100644
      }
  
      // solidSDF will be deleted within the thread after use
-@@ -10048,14 +11437,23 @@ void FluidSimulation::_launchOutputSurfaceMeshThread() {
+@@ -10048,14 +11462,23 @@ void FluidSimulation::_launchOutputSurfaceMeshThread() {
          std::vector<int> *ids = nullptr;
          _markerParticles.getAttributeValues("SOURCEID", ids);
  
@@ -3333,7 +3437,7 @@ index 10989a7..b583683 100644
  
      if (!_isAsynchronousMeshingEnabled && _mesherThread.joinable()) {
          _mesherThread.join();
-@@ -10872,6 +12270,7 @@ void FluidSimulation::_stepFluid(double dt) {
+@@ -10872,6 +12295,7 @@ void FluidSimulation::_stepFluid(double dt) {
          _deleteSavedVelocityField();
          _advanceMarkerParticles(dt);
          _updateFluidObjects();
@@ -3341,8 +3445,18 @@ index 10989a7..b583683 100644
          _updateMarkerParticleAttributes(dt);
          _outputSimulationData();
      }
+@@ -10935,7 +12359,8 @@ double FluidSimulation::_predictMaximumMarkerParticleSpeed(double dt) {
+ 
+         MeshObject *object = source->getMeshObject();
+         vmath::vec3 fluidVelocity = source->getVelocity();
+-        maxu = fmax(_getMaximumMeshObjectFluidVelocity(object, fluidVelocity), maxu);
++        maxu = fmax(_getMaximumMeshObjectFluidVelocity(object, fluidVelocity) +
++                    source->getMaxTurbulenceSpeed(), maxu);
+     }
+ 
+     maxu += vmath::length(_getConstantBodyForce()) * dt;
 diff --git a/src/engine/fluidsimulation.h b/src/engine/fluidsimulation.h
-index 46f70b5..cbb9767 100644
+index 46f70b5..b7b065e 100644
 --- a/src/engine/fluidsimulation.h
 +++ b/src/engine/fluidsimulation.h
 @@ -492,6 +492,62 @@ public:
@@ -3519,7 +3633,18 @@ index 46f70b5..cbb9767 100644
      double _getMarkerParticleJitter();
      vmath::vec3 _jitterMarkerParticlePosition(vmath::vec3 p, double jitter);
      void _addMarkerParticles(std::vector<MarkerParticle> &particles, MarkerParticleAttributes attributes);
-@@ -2074,7 +2213,8 @@ private:
+@@ -2022,7 +2161,9 @@ private:
+                            MeshLevelSet &meshsdf,
+                            vmath::vec3 sdfoffset,
+                            MarkerParticleAttributes attributes,
+-                           ParticleMaskGrid &maskgrid);
++                           ParticleMaskGrid &maskgrid,
++                           MeshFluidSource *turbulentSource = nullptr,
++                           double time = 0.0);
+     void _addNewFluidCells(std::vector<GridIndex> &cells, 
+                            vmath::vec3 velocity,
+                            RigidBodyVelocity rvelocity,
+@@ -2074,7 +2215,8 @@ private:
      void _outputSurfaceMeshThread(std::vector<vmath::vec3> *particles,
                                    MeshLevelSet *solidSDF,
                                    MACVelocityField *vfield,
@@ -3529,7 +3654,7 @@ index 46f70b5..cbb9767 100644
      void _updateMeshingVolumeSDF();
      void _applyMeshingVolumeToSDF(MeshLevelSet *sdf);
      void _filterParticlesOutsideMeshingVolume(std::vector<vmath::vec3> *particles);
-@@ -2142,12 +2282,14 @@ private:
+@@ -2142,12 +2284,14 @@ private:
                                          std::vector<float> &binSpeeds, 
                                          std::vector<char> &outdata);
      void _smoothSurfaceMesh(TriangleMesh &mesh);
@@ -3545,7 +3670,7 @@ index 46f70b5..cbb9767 100644
      void _outputSimulationLogFile();
  
  
-@@ -2290,6 +2432,11 @@ private:
+@@ -2290,6 +2434,11 @@ private:
      bool _isPrecomputedSolidLevelSetUpToDate = false;
      int _solidLevelSetExactBand = 3;
      bool _isSmoothSurfaceTensionKernelEnabled = false;
@@ -3557,7 +3682,7 @@ index 46f70b5..cbb9767 100644
      double _liquidSDFParticleScale = 1.0;
      double _liquidSDFParticleRadius = 0.0;
      double _liquidSDFSurfaceTensionParticleScale = 2.0;
-@@ -2392,6 +2539,13 @@ private:
+@@ -2392,6 +2541,13 @@ private:
      bool _isMeshingVolumeLevelSetUpToDate = false;
  
      bool _isAsynchronousMeshingEnabled = true;
@@ -3571,7 +3696,7 @@ index 46f70b5..cbb9767 100644
      std::thread _mesherThread;
  
      // Advect velocity field
-@@ -2532,6 +2686,24 @@ private:
+@@ -2532,6 +2688,24 @@ private:
  
      std::random_device _randomDevice;
      std::mt19937 _randomSeed;
@@ -44471,6 +44596,218 @@ index 20afbf1..941ff03 100644
  
      float _getPseudoTimeStep(Array3d<float> &sdf, float dx);
      float _sign(Array3d<float> &sdf, float dx, int i, int j, int k);
+diff --git a/src/engine/meshfluidsource.cpp b/src/engine/meshfluidsource.cpp
+index 43807c6..79f48da 100644
+--- a/src/engine/meshfluidsource.cpp
++++ b/src/engine/meshfluidsource.cpp
+@@ -24,6 +24,9 @@ SOFTWARE.
+ 
+ #include "meshfluidsource.h"
+ 
++#include <cmath>
++#include <random>
++
+ int MeshFluidSource::_IDCounter = 0;
+ 
+ bool compareMeshFluidSourcePointer(MeshFluidSource *a, MeshFluidSource *b) { return *a < *b; }
+@@ -142,6 +145,140 @@ vmath::vec3 MeshFluidSource::getVelocity() {
+     return _sourceVelocity;
+ }
+ 
++void MeshFluidSource::setTurbulence(double intensity, double length, double seed) {
++    _turbulenceModes.clear();
++    _turbulenceIntensity = 0.0;
++    _turbulenceAmplitudeSum = 0.0;
++    if (intensity <= 0.0 || length <= 0.0) {
++        return;
++    }
++    _turbulenceIntensity = intensity;
++
++    const int nmodes = 32;
++    const double pi = 3.14159265358979323846;
++    std::mt19937 rng((unsigned int)(long long)seed);
++    std::uniform_real_distribution<double> uni(0.0, 1.0);
++    double k0 = 2.0 * pi / length;
++    double sum = 0.0;
++    while ((int)_turbulenceModes.size() < nmodes) {
++        // wavenumbers log-uniform from the largest eddy down to a quarter of
++        // it: each mode then carries energy ~ k^(-2/3), as E(k) ~ k^(-5/3)
++        double k = k0 * pow(4.0, uni(rng));
++        double z = 2.0 * uni(rng) - 1.0;
++        double phi = 2.0 * pi * uni(rng);
++        double r = sqrt(std::max(1.0 - z * z, 0.0));
++        double kh[3] = {r * cos(phi), r * sin(phi), z};
++        // the amplitude perpendicular to k keeps the field divergence-free
++        double q[3] = {2.0 * uni(rng) - 1.0, 2.0 * uni(rng) - 1.0, 2.0 * uni(rng) - 1.0};
++        double a[3] = {kh[1] * q[2] - kh[2] * q[1],
++                       kh[2] * q[0] - kh[0] * q[2],
++                       kh[0] * q[1] - kh[1] * q[0]};
++        double alen = sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
++        double phase = 2.0 * pi * uni(rng);
++        if (alen < 1e-6) {
++            continue;
++        }
++        double amp = pow(k / k0, -1.0 / 3.0);
++        TurbulenceMode m;
++        for (int c = 0; c < 3; c++) {
++            m.k[c] = k * kh[c];
++            m.a[c] = amp * a[c] / alen;
++        }
++        m.phase = phase;
++        m.klen = k;
++        _turbulenceModes.push_back(m);
++        sum += amp * amp;
++    }
++    // each component's variance 1: <u.u> = sum |a|^2 / 2 = 3
++    double s = sqrt(6.0 / sum);
++    for (size_t n = 0; n < _turbulenceModes.size(); n++) {
++        TurbulenceMode &m = _turbulenceModes[n];
++        double alen = 0.0;
++        for (int c = 0; c < 3; c++) {
++            m.a[c] *= s;
++            alen += m.a[c] * m.a[c];
++        }
++        _turbulenceAmplitudeSum += sqrt(alen);
++    }
++}
++
++double MeshFluidSource::getTurbulenceIntensity() {
++    return _turbulenceIntensity;
++}
++
++vmath::vec3 MeshFluidSource::getTurbulentVelocity(vmath::vec3 p, double time) {
++    vmath::vec3 v = _sourceVelocity;
++    if (_turbulenceModes.empty()) {
++        return v;
++    }
++    double speed = vmath::length(v);
++    double sigma = _turbulenceIntensity * speed;
++    if (sigma <= 0.0) {
++        return v;
++    }
++    double x[3] = {p.x - time * v.x, p.y - time * v.y, p.z - time * v.z};
++    double u[3] = {0.0, 0.0, 0.0};
++    for (size_t n = 0; n < _turbulenceModes.size(); n++) {
++        const TurbulenceMode &m = _turbulenceModes[n];
++        double arg = m.k[0] * x[0] + m.k[1] * x[1] + m.k[2] * x[2] + m.phase + m.klen * sigma * time;
++        double c = cos(arg);
++        u[0] += c * m.a[0];
++        u[1] += c * m.a[1];
++        u[2] += c * m.a[2];
++    }
++    vmath::vec3 fl((float)(sigma * u[0]), (float)(sigma * u[1]), (float)(sigma * u[2]));
++
++    return v + fl;
++}
++
++bool MeshFluidSource::_isInOutletLayer(vmath::vec3 p) {
++    float d = trilinearInterpolate(p);
++    if (d <= 0.0f || d > 2.0 * _dx) {
++        return false;
++    }
++    float h = (float)(0.5 * _dx);
++    vmath::vec3 ex(h, 0.0f, 0.0f), ey(0.0f, h, 0.0f), ez(0.0f, 0.0f, h);
++    vmath::vec3 n(trilinearInterpolate(p + ex) - trilinearInterpolate(p - ex),
++                  trilinearInterpolate(p + ey) - trilinearInterpolate(p - ey),
++                  trilinearInterpolate(p + ez) - trilinearInterpolate(p - ez));
++    double nlen = vmath::length(n);
++    double speed = vmath::length(_sourceVelocity);
++    return nlen > 1e-9 && speed > 1e-9 && vmath::dot(n, _sourceVelocity) >= 0.5 * nlen * speed;
++}
++
++bool MeshFluidSource::getOutletTurbulenceKick(vmath::vec3 p, vmath::vec3 velocity,
++                                              double time, double dt, vmath::vec3 &kick) {
++    // Water inside the inflow moves with the mean velocity only. Turbulent
++    // velocities there opened gaps the emission refilled while crowded spots
++    // stayed (learning scene, water delivered in frames 6-12: +14 % at 10 %,
++    // +30 % at 25 %), and forcing them on the water just outside drained the
++    // inflow faster (+7.8 % particles at 10 %). Instead each particle in the
++    // two cells beyond the outlet gets the change of the turbulent velocity
++    // along its path since the last step: leaving the layer it carries
++    // u'(p, t) on top of its own flow, and the flow rate is untouched.
++    if (_turbulenceModes.empty() || !_isInOutletLayer(p)) {
++        return false;
++    }
++    vmath::vec3 previous = p - (float)dt * velocity;
++    vmath::vec3 now = getTurbulentVelocity(p, time) - _sourceVelocity;
++    if (trilinearInterpolate(previous) <= 0.0f) {
++        kick = now;
++        return true;
++    }
++    if (_isInOutletLayer(previous)) {
++        kick = now - (getTurbulentVelocity(previous, time - dt) - _sourceVelocity);
++        return true;
++    }
++    return false;
++}
++
++double MeshFluidSource::getMaxTurbulenceSpeed() {
++    // For the time step. The strict bound (sum of all amplitudes, 13.8 sigma)
++    // halved the steps for nothing: 200,000 samples reached at most 4.65 sigma
++    double sigma = _turbulenceIntensity * vmath::length(_sourceVelocity);
++    return std::min(6.0 * sigma, sigma * _turbulenceAmplitudeSum);
++}
++
+ void MeshFluidSource::enableAppendObjectVelocity() {
+     _meshObject.enableAppendObjectVelocity();
+ }
+diff --git a/src/engine/meshfluidsource.h b/src/engine/meshfluidsource.h
+index 5911312..0828a07 100644
+--- a/src/engine/meshfluidsource.h
++++ b/src/engine/meshfluidsource.h
+@@ -24,6 +24,8 @@ SOFTWARE.
+ 
+ #pragma once
+ 
++#include <vector>
++
+ #include "meshobject.h"
+ #include "macvelocityfield.h"
+ 
+@@ -133,6 +135,19 @@ public:
+     void setSourceColor(vmath::vec3 c);
+     vmath::vec3 getSourceColor();
+ 
++    // HydroKit: turbulence of the inflowing water. Random Fourier modes
++    // (Kraichnan 1970) with a Kolmogorov -5/3 spectrum, divergence-free,
++    // frozen and carried with the inflow velocity (Taylor 1938) and slowly
++    // changing at the eddies' turnover rate. intensity: RMS of each velocity
++    // component relative to the inflow speed; length: the largest eddies (m);
++    // seed as a whole number (double for the C binding)
++    void setTurbulence(double intensity, double length, double seed);
++    double getTurbulenceIntensity();
++    vmath::vec3 getTurbulentVelocity(vmath::vec3 p, double time);
++    bool getOutletTurbulenceKick(vmath::vec3 p, vmath::vec3 velocity,
++                                 double time, double dt, vmath::vec3 &kick);
++    double getMaxTurbulenceSpeed();
++
+     int _isize = 0;
+     int _jsize = 0;
+     int _ksize = 0;
+@@ -142,12 +157,23 @@ public:
+ private:
+ 
+     void _initializeID();
++    bool _isInOutletLayer(vmath::vec3 p);
+     void _calculateVelocityFieldData();
+     void _getGridBoundsFromTriangleMesh(TriangleMesh &m, double pad, 
+                                         GridIndex &gmin, GridIndex &gmax);
+ 
+     int _currentFrame = 0;
+     float _currentFrameInterpolation = 0.0f;
++
++    struct TurbulenceMode {
++        double k[3];
++        double a[3];
++        double phase = 0.0;
++        double klen = 0.0;
++    };
++    std::vector<TurbulenceMode> _turbulenceModes;
++    double _turbulenceIntensity = 0.0;
++    double _turbulenceAmplitudeSum = 0.0;
+     bool _isUpToDate = false;
+     int _exactBand = 2;
+ 
 diff --git a/src/engine/meshutils.cpp b/src/engine/meshutils.cpp
 index 47dc2c8..28f1cac 100644
 --- a/src/engine/meshutils.cpp

@@ -436,6 +436,40 @@ Measured, learning scene resumed at frame 105, Resolution 80:
 Times include the simulation step. Frame to frame the volume changes by at
 most 0.2 %: no flicker from the threshold chosen anew each frame.
 
+## 13. Inflow turbulence
+
+An inflow emitted every particle with one velocity: a perfectly smooth slab
+of water that stays smooth and looks rigid. Rivers are turbulent: Nezu
+(1977) measured u'/u* = 2.3 exp(-y/h) along the flow in open channels (1.27
+vertical, 1.63 across); with u*/U = 0.05-0.1 that is 7-15 % of the mean
+speed over the depth. New: `MeshFluidSource::setTurbulence(intensity,
+length, seed)`, in Python `set_turbulence()` (extension "Inflow
+turbulence").
+
+- The field: 32 random Fourier modes (Kraichnan 1970), wavenumbers
+  log-uniform from the largest eddy (`length`) down to a quarter of it with
+  energy for a Kolmogorov -5/3 spectrum, amplitudes perpendicular to their
+  wave vectors (divergence-free), frozen and carried with the inflow
+  velocity (Taylor 1938), changing at the eddies' turnover rate. Checked on
+  200,000 samples at 10 %: 9.5-10.4 % RMS per direction, mean 0, divergence
+  0.018 1/s against gradients of 2.9 1/s (finite-difference noise).
+- Where it acts: inside the inflow the water keeps the mean velocity.
+  Turbulent velocities there opened gaps the emission refilled while crowded
+  spots stayed (learning scene, water delivered in frames 6-12: +14 % at
+  10 %, +30 % at 25 %); forcing them on the water just outside drained the
+  inflow faster (+7.8 % particles at 10 %). Each particle in the two cells
+  beyond the outlet instead gets the change of the turbulent velocity along
+  its path since the last step (`getOutletTurbulenceKick`): it leaves with
+  u'(p, t) on top of its own flow. Only for constrained inflows.
+- Time step: the speed bound adds 6 sigma (the sum of all amplitudes, 13.8
+  sigma, halved the steps for nothing; 200,000 samples reached 4.65 sigma).
+
+Measured on the learning scene without its outflow, 24 frames: the inflow
+delivers +0.4 % water at 10 %, +7 % at 25 %; 1.5 times as many time steps
+alone add 1.7 %. With the outflow, frame 48: mesh area 75.9 m2 at 0 %,
+75.8 at 10 %, 76.3 at 25 % — the change is in the shape: the falling sheet
+breaks into streaks and splashes.
+
 ## Lens drops (sim/linse.py, no engine change)
 
 Computed after baking from the cache; the sources for each part:

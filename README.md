@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/FAAAHHH/HyprW/releases/latest"><b>Download</b></a> ·
   <a href="#installation">Install</a> ·
-  <a href="#new-in-120">What's new</a> ·
+  <a href="#new-in-130">What's new</a> ·
   <a href="#features">Features</a> ·
   <a href="#tests">Tests</a>
 </p>
@@ -31,6 +31,28 @@ surface, whitewater, mist, wind, drops on the camera lens and materials.
 Wherever it can, it uses measured physics with a source; where it has to
 approximate, the code and the help texts say so. The FLIP Fluids add-on is
 **not** needed.
+
+## New in 1.3.0
+
+### Turbulent inflows
+
+<p align="center">
+  <img src="docs/images/turbulence.jpg" alt="The same waterfall with inflow turbulence 0 %, 10 % and 25 %: from a smooth sheet to a torn, streaky curtain with splashes" width="100%">
+  <br>
+  <sub>Inflow turbulence <b>0 %</b> (before) · <b>10 %</b> (new default) · <b>25 %</b>. Same scene, frame 48.</sub>
+</p>
+
+An inflow used to emit every particle with one velocity: a perfectly smooth
+slab of water that stays smooth and looks rigid. Rivers are turbulent —
+Nezu (1977) measured the fluctuations in open channels, 7–15 % of the mean
+speed for typical rivers. **Inflow › Turbulence** gives the leaving water
+such eddies: a divergence-free field with a Kolmogorov spectrum (Kraichnan
+1970), carried with the flow (Taylor 1938); **Eddies** sets the size of the
+largest swirls (0 = the inflow's thinnest side).
+
+The inflow still delivers the water it should: +0.4 % at 10 %, +7 % at
+25 % (measured without an outflow; smaller time steps alone add 1.7 %).
+On by default at 10 % — set 0 % for the smooth inflow of 1.2.
 
 ## New in 1.2.0
 
@@ -158,8 +180,8 @@ everything runs on the CPU.
 
     blender -b --factory-startup --python tests/blender_kameratropfen.py -- <path to this folder>
 
-289 checks: bake, the bake's worker thread, the anisotropic surface's
-volume, viscosity and surface tension, saved states and resuming, roles,
+292 checks: bake, the bake's worker thread, the anisotropic surface's
+volume, inflow turbulence, viscosity and surface tension, saved states and resuming, roles,
 obstacle sheets, Hybrid Water, GPU against CPU, playback, materials, lens
 drops, register and unregister.
 

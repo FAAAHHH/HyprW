@@ -35,6 +35,7 @@ ERWEITERUNGEN = (
     # default) raised AttributeError and ended the bake, with no warning before
     ("zwischenstand", "Saved states",      "FluidSimulation_has_marker_particle_level_data"),
     ("aniso",        "Anisotropic surface", "FluidSimulation_enable_anisotropic_meshing"),
+    ("turbulenz",    "Inflow turbulence",  "MeshFluidSource_set_turbulence"),
 )
 
 # The steps of a frame and their GPU versions (engine_patch/README.md section
@@ -232,6 +233,14 @@ def _sim_aufbauen(scene, domain, bericht=None, stand=None):
         # the whole time). With velocity 0 and constrained the water barely
         # leaves the inflow — the panel warns about that.
         quelle.enable_constrained_fluid_velocity = bool(obj.hydrokit.zufluss_erzwingen)
+        # INFLOW TURBULENCE (engine_patch/README.md section 13); the seed
+        # from the name, so every bake of the scene swirls the same way
+        if obj.hydrokit.zufluss_turbulenz > 0.0 and engine_erweiterungen()["turbulenz"]:
+            import zlib
+            seiten = [s for s in obj.dimensions if s > 1e-6] or [dx]
+            wirbel = obj.hydrokit.zufluss_wirbel or min(seiten)
+            quelle.set_turbulence(obj.hydrokit.zufluss_turbulenz / 100.0, wirbel,
+                                  zlib.crc32(obj.name.encode()) & 0x7fffffff)
         quelle.substep_emissions = obj.hydrokit.zufluss_substeps
         sim.add_mesh_fluid_source(quelle)
         halter.append(quelle)
